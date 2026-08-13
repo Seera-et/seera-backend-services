@@ -1,0 +1,26 @@
+bin/
+coverage.out
+*.test
+
+.env
+.env.local
+*.pem
+*.key
+
+# Python workers
+workers/.venv/
+workers/**/__pycache__/
+workers/**/*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Local corpus and generated artifacts — never commit legal source files
+tmp/
+data/
+storage/
+eval/results/*.json
+!eval/results/.gitkeep
+
+.DS_Store
+.idea/
+.vscode/

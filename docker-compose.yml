@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: seera-postgres
+    environment:
+      POSTGRES_USER: seera
+      POSTGRES_PASSWORD: seera
+      POSTGRES_DB: seera
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seera -d seera"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    command:
+      # Vector index builds and HNSW search benefit from more working memory
+      # than the defaults allow.
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+
+volumes:
+  pgdata:
