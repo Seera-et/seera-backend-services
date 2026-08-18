@@ -1,6 +1,9 @@
 # Feature 1 — AI Legal Q&A: Implementation Plan
 
-**Status:** planned, not started
+**Status:** §3 and Phases 0–3 **verified end to end against a real database** (Neon) on
+2026-08-17: 55 articles ingested and embedded, a grounded cited answer streamed, citations
+resolving. Phase 4 (evaluation) and Phase 5 (UI) not started. Measured latency misses the
+targets — see "First real run" below.
 **Created:** 2026-08-14
 **Scope rule:** this is the only feature under construction. Knowledge Explorer, Business
 Advisor, and Document Intelligence are **out of scope** until Q&A meets its exit gates —
@@ -37,10 +40,10 @@ Legal PDFs (EN + AM)
 
 | Area | Decision | Notes |
 |---|---|---|
-| Embeddings | OpenAI `text-embedding-3-large`, `dimensions=1536` | 1536 keeps it under pgvector's 2000-dim HNSW ceiling for `vector`. Behind `ai.Embedder`. |
+| Embeddings | **Gemini `gemini-embedding-001`, 1536 dims** (was: OpenAI) | 1536 keeps it under pgvector's 2000-dim HNSW ceiling. The OpenAI path still exists and is used if `GEMINI_API_KEY` is unset. |
 | Ingestion | Offline Python script → JSON → Go ingest | No worker service. Parse quality is inspected per document. |
 | Reranker | Cohere Rerank (multilingual) | Behind `rag.Reranker`. One HTTP call, no infra. |
-| Generation | Anthropic, `claude-opus-5` via official `anthropic-sdk-go` | Behind `ai.LLM`. SDK types never leave `internal/ai/anthropic.go`. |
+| Generation | **Gemini `gemini-2.5-flash`** (was: Anthropic) | Behind `ai.LLM`, in `internal/ai/gemini.go`. Changed 2026-08-16 at the user's direction. |
 | Corpus | **English + Amharic from day one** | 10–20 docs; see the risk in §2.1. |
 | HTTP | `chi` router, REST + SSE | Per SRS §7.2. |
 | DB access | `pgx` v5, hand-written SQL | No ORM. |
@@ -87,24 +90,52 @@ cmd/api
   `local.go` stays empty for now.
 - `internal/rag` orchestrates; it never talks to pgx directly — it goes through
   `internal/search` and `internal/citations`.
+- `internal/search` embeds the query itself, so it also imports `internal/ai`. Retrieval
+  is question-in, results-out; callers do not pre-compute vectors for it.
 - `internal/business`, `internal/documents`, `internal/qa/…` beyond what's listed: untouched.
 
-**Phase 0 chore:** `.claude/skills/project-architecture/SKILL.md` still documents the old
-layout (`internal/api`, `internal/service`, `internal/repository`, `internal/domain`,
-`internal/provider`, `migrations/`, `workers/`). It is a rules file Claude follows — update
-its "Where things go" table to match the tree above before writing code, or it will keep
-steering work into deleted directories.
+**Done.** `internal/legal/model.go` holds the domain types, `internal/ai/{llm,embeddings}.go`
+the provider interfaces, `internal/citations/model.go` the `Citation` payload and `Resolver`.
+Verified: `internal/legal` and `internal/ai` import no sibling package; `internal/citations`
+imports only `internal/legal`. Every other `.go` file in the tree is still a bare `package`
+clause.
 
-**One deviation from the agreed folder tree:** the Python extraction script needs a home.
-Add `workers/extraction/` back (script + `requirements.txt` + README). It is not a service
-and is not imported by Go; it is run by hand and produces JSON.
+**Done — `project-architecture` skill updated.** Its "Where things go" table described the
+deleted layout (`internal/api`, `internal/service`, `internal/repository`, `internal/domain`,
+`internal/provider`, `migrations/`). It now matches the feature-sliced tree and carries the
+dependency-direction diagram above, so future work is steered by the same rules as this plan.
+
+**Done — `workers/extraction/`** exists with `requirements.txt` and a README fixing the
+JSON contract that `internal/ingestion/parser.go` will read. The extractor itself
+(`extract.py`) is Phase 1 §5.2 and is deliberately not written yet. It is not a service and
+is not imported by Go; it is run by hand and produces JSON.
 
 ---
 
-## 4. Phase 0 — Foundation
+## 4. Phase 0 — Foundation — **done**
 
 Nothing in Phases 1–5 can run without this. Target: a server that boots, connects, and
 answers `/healthz`.
+
+Three decisions made while building it, worth knowing before Phase 3:
+
+- **`http.Server.WriteTimeout` is 0, deliberately.** It is an absolute deadline from the
+  start of the request, not an idle timeout, so any non-zero value truncates a long SSE
+  answer mid-sentence. Per-request deadlines go on the request context instead.
+- **Migrations are forward-only**, embedded in the binary, applied one-per-transaction
+  under a Postgres advisory lock so concurrent instances cannot race. No down migrations:
+  rolling a schema backwards in a system whose premise is that legal history is never
+  destroyed is a footgun. The `.up.sql` suffix is kept only for golang-migrate compatibility.
+- **AI keys are not required at boot.** Each adapter will refuse to construct without its
+  key; startup logs which are missing. This keeps a database-only run possible, which is
+  exactly what Phase 1 needs.
+
+Verified: `go build ./...`, `go vet ./...`, `gofmt` clean, `go test ./...` green (health
+200/503, error envelope, CORS allow-list, rate-limit burst + eviction, config validation
+and secret redaction, migration loading). Startup failure paths checked by running the
+binary. **Not verified end-to-end:** no Docker on this machine and the local Postgres has
+no pgvector, so `docker compose up` → `/healthz` → `{"status":"ok","db":"up"}` still needs
+one run on a machine that has Docker.
 
 - `internal/config/config.go` — env-driven config: `DATABASE_URL`, `OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, `COHERE_API_KEY`, `PORT`, `LOG_LEVEL`, `ENV`. Fail fast on missing
@@ -126,14 +157,58 @@ answers `/healthz`.
 
 ---
 
-## 5. Phase 1 — Knowledge
+## 5. Phase 1 — Knowledge — **code done, corpus outstanding**
 
-### 5.1 Corpus
+Built: `workers/extraction/` (extractor, Ge'ez numerals, window fallback, per-document
+report, 16 unit tests), migrations `0002_legal` and `0003_embeddings`,
+`internal/legal/repository.go`, `internal/ai/openai.go`, the whole of
+`internal/ingestion/`, and `POST /api/v1/admin/documents/ingest` behind a bearer token.
+
+Still needed to close the phase: **the 10–20 documents**, and one run against a real
+Postgres. Neither is possible on a machine with no corpus and no pgvector.
+
+Decisions made while building, that Phase 2 depends on:
+
+- **Embedding happens before the transaction opens.** Embedding a 400-article code is
+  minutes of network I/O; holding a transaction across it pins a connection for the
+  duration and rolls everything back on a crash anyway. Vectors first, then one short
+  write transaction.
+- **`publish` defaults to false.** A document is invisible to retrieval until someone has
+  read the parse report. The database enforces at most one published version per document
+  via a partial unique index, so a half-applied publish cannot exist.
+- **Window fallback is labelled, not disguised.** When article detection fails, chunks are
+  numbered `window-N` and marked `structure_confidence: low` rather than given fake article
+  numbers. A citation that claims to point at Article 12 when it points at
+  "characters 30,000–32,500" is worse than one that admits what it is.
+- **The `language → FTS config` mapping now lives in two places** — `legal.Language.FTSConfig`
+  for the query side, and a `CASE` in the `chunks.fts` generated column for the index side.
+  They must agree or lexemes will not match. Noted in both.
+
+### 5.1 Corpus — assessed, see [CORPUS.md](CORPUS.md)
 
 10–20 documents. Bias toward commercial/business law so the 50 questions have real answers
 in-corpus, and include at least 3 Amharic documents so the language split in §9 is
 meaningful. For each: title, doc type, issuing authority, publication + effective date,
 language, source URL, and the PDF itself.
+
+**Reality of the collected corpus (79 PDFs, assessed 2026-08-15).** 8207 articles have
+been extracted from 22 documents with no OCR — including the Civil, Commercial, Criminal,
+Civil Procedure, Family and Criminal Procedure codes in English, all with complete section
+paths. But the assumption that Amharic would carry the corpus is wrong: **exactly one
+usable Amharic statute exists**, Commercial Code 1243. The Amharic editions of the other
+major codes all carry text layers that are OCR debris, not language.
+
+Two consequences for later phases:
+
+- The **language-split Precision@5 gate in §9 cannot be measured meaningfully yet** — one
+  Amharic document is not a language sample. Either the eval set is English-first until
+  the Addis Ababa professors supply better Amharic sources, or the Amharic half of it
+  rests entirely on Commercial Code 1243.
+- `United States Sentencing Commission Guideline Manual.pdf` is in the folder and must
+  **not** be ingested. An Ethiopian legal question that retrieves US sentencing guidelines
+  and cites them as authority is the exact failure this whole architecture exists to
+  prevent, and no amount of grounding validation catches it — the citation would resolve
+  correctly to a document that simply is not Ethiopian law.
 
 ### 5.2 Extraction (Python, offline)
 
@@ -233,7 +308,29 @@ justify; spot-checking 10 random chunks shows complete, correctly-attributed pro
 
 ---
 
-## 6. Phase 2 — Retrieval
+## 6. Phase 2 — Retrieval — **code done, unrun**
+
+Built: `internal/search/{service,vector,keyword,hybrid}.go` and
+`internal/rag/reranker.go`. Not wired into `cmd/api` — nothing consumes retrieval until
+the Q&A endpoint in Phase 3, and a route that exists only to prove the code compiles is
+worse than no route.
+
+Decisions made while building:
+
+- **Keyword search runs once per language, not once overall.** The `fts` column is built
+  per row under that row's configuration, and a `tsquery` only matches lexemes from the
+  same configuration — one query cannot correctly span both. Two indexed queries are also
+  faster than one that computes the configuration per row, which would defeat the GIN
+  index entirely.
+- **Trigram is a fallback, not a parallel arm.** It runs only when Amharic full-text
+  returns nothing, which happens often: `simple` does no stemming, and Ethiopian legal
+  Amharic is heavily inflected.
+- **Article-reference parsing handles enumerations** — "articles 45, 46 and 47" — because
+  legal questions routinely name several provisions and returning only the first silently
+  answers half the question.
+- **Ge'ez conversion now exists twice**, in Python at ingest and Go at query time. Both are
+  tested against the same cases; a disagreement means a query for አንቀጽ ፵፭ silently misses
+  the article stored as "45".
 
 `internal/search/` — three retrievers, one fuser.
 
@@ -264,7 +361,87 @@ overall and per language.
 
 ---
 
-## 7. Phase 3 — Generation
+## 7. Phase 3 — Generation — **verified end to end**
+
+### Local Docker stack (2026-08-17)
+
+`docker compose up -d` now runs Postgres 16 + pgvector locally, and the payoff was the
+latency miss: **retrieval fell from 1633–3214ms on Neon to 405–424ms locally**, inside the
+< 1s target, and TTFT reached 2.3s, inside the < 3s target. The database was never the slow
+part — the transatlantic round trips were. The Dockerfile also builds and runs for the first
+time (22.8MB distroless, non-root, `/healthz` green against the compose network); the API
+service is behind a `full` profile so the default `up` stays database-only for a fast dev
+loop.
+
+**Corpus in the local database:** 879 chunks across two published documents — the 1931
+Constitution (55) and the 2021 Commercial Code (824). Real questions answer correctly
+against it.
+
+**The binding constraint is now the Gemini free tier, and it has two limits:** ~100 embedded
+texts per minute and **~1000 per day**. Pacing (`EMBED_TEXTS_PER_MINUTE`, default 90) handles
+the first; nothing handles the second. The Amharic Commercial Code (838 chunks) could not be
+ingested because the day's budget was already spent on the English one — and once the daily
+cap is hit, *query* embedding fails too, so the whole answer path goes down. That failure is
+now reported as `quota_exhausted` with an honest message rather than "something went wrong".
+
+Roughly one mid-sized code per day is the free-tier ceiling. A real corpus needs a paid key.
+
+### First real run (2026-08-17, against Neon)
+
+`.env` pointed at a Neon Postgres, so the whole slice ran for real. All four migrations
+applied — including the `chunks.fts` generated column, the one piece of SQL flagged as
+unverifiable without a database. The 1931 Constitution ingested in 6.8s (55 articles → 55
+chunks, Gemini embeddings, published), and a question about the Emperor's powers returned a
+grounded answer citing Articles 5, 6, 9, 11, 16 and 17 — the correct six. An exact-article
+query put Article 16 at rank 1. An out-of-corpus question was declined rather than answered.
+
+Three things the run found that no amount of unit testing would have:
+
+- **`gemini-2.5-flash` 404s for keys created after its retirement.** The API's own error
+  names the successor. The default is now chosen on *measured* time-to-first-token:
+  `gemini-3.5-flash` 2.1s, `gemini-3.1-flash-lite` 3.3s, `gemini-3.6-flash` 52.9s,
+  `gemini-3.7-flash` 503. The newest model is not the best model for this path — generation
+  here is retrieval-bound, and the heavier thinking models spend tens of seconds on
+  reasoning that buys nothing when the law is already in the context.
+- **`citations.Citation` had no JSON tags**, so `GET /api/v1/citations/{id}` served
+  PascalCase while the SSE events served snake_case — two shapes for one concept. Fixed,
+  with a test that fails if the tags are ever dropped.
+- **`batchEmbedContents` works but is not advertised** in `gemini-embedding-001`'s
+  `supportedGenerationMethods`. Trusting the metadata would have meant rewriting a working
+  batch path into per-item calls.
+
+**Latency misses both targets and the cause is retrieval, not generation:** TTFT 4.1–5.1s
+against < 3s, retrieval 1.6–3.2s against < 1s. The database is in `us-east-2` and the three
+retrieval arms run sequentially, so each is a separate transatlantic round trip on top of a
+query-embedding call. Running the arms concurrently is the obvious first fix; co-locating
+the database is the second. Neither is a design change.
+
+### Original plan
+
+Built: `internal/ai/gemini.go`, `internal/rag/{context,grounding,service}.go`,
+`internal/citations/{repository,service}.go`, `internal/qa/{dto,service,handler}.go`,
+migration `0004_gemini_embeddings`, and both routes. 54 tests across the phase.
+
+Four decisions worth carrying forward:
+
+- **Sources are numbered `[S1]`, not labelled with chunk UUIDs.** A UUID is 36
+  characters the model must reproduce exactly, and one transposed character turns a
+  correct citation into an unresolvable one. A small integer cannot be mistyped into a
+  *different valid* source, and any number outside the range is provably invalid. The
+  marker-to-chunk mapping lives server-side, so a citation is still a database record
+  and is never model-authored.
+- **Grounding is enforced during the stream, not after it.** Post-hoc validation cannot
+  help — by the time the answer is validated it is already on the user's screen. A
+  `MarkerFilter` holds the stream at an opening bracket and releases the marker only if
+  it names a real source. An invented citation never reaches the client.
+- **Only cited sources are returned.** Returning all retrieved sources would let an
+  ungrounded answer arrive wearing a full set of plausible references.
+- **The embedder now distinguishes documents from queries** (`Embed` vs `EmbedQuery`).
+  Gemini embeds a passage and a question about it into deliberately different spaces;
+  using the document path for a query costs retrieval accuracy for nothing.
+
+### Original plan
+
 
 `internal/rag/context.go` — build the sources block: numbered chunks, each with a metadata
 header and its `chunk_id`. Hard token budget; drop from the tail, never the head.

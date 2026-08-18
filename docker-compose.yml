@@ -1,30 +1,66 @@
+# Local development.
+#
+#   docker compose up -d                     database only (the default)
+#   docker compose --profile full up --build  database + API in a container
+#
+# The default is the database alone because the API is faster to iterate on the
+# host: `go run ./cmd/api` rebuilds in seconds where an image rebuild does not.
+# The `full` profile exists to verify the image itself, which is what ships.
+
 services:
   postgres:
-    image: pgvector/pgvector:pg17
+    # pgvector on Postgres 16. The plain postgres image does not ship the
+    # extension, and 0001_extensions.up.sql will fail against it.
+    image: pgvector/pgvector:pg16
     container_name: seera-postgres
     environment:
       POSTGRES_USER: seera
       POSTGRES_PASSWORD: seera
       POSTGRES_DB: seera
+      # Ethiopian legal text is indexed with the "simple" configuration for
+      # Amharic; the initdb locale only affects collation and sorting.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
+      # The API's own migrations run on boot and will fail against a database
+      # that is still initialising, so wait for a real readiness signal.
       test: ["CMD-SHELL", "pg_isready -U seera -d seera"]
       interval: 5s
-      timeout: 5s
+      timeout: 3s
       retries: 10
-    command:
-      # Vector index builds and HNSW search benefit from more working memory
-      # than the defaults allow.
-      - postgres
-      - -c
-      - shared_buffers=512MB
-      - -c
-      - maintenance_work_mem=512MB
-      - -c
-      - shared_preload_libraries=pg_stat_statements
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    profiles: ["full"]
+    build: .
+    container_name: seera-api
+    # Credentials come from .env, which is gitignored. This file is not: a
+    # default written here would be a secret in version control, one `git add`
+    # away from being published. Everything the API needs that is *not* secret is
+    # in `environment` below, which overrides the file.
+    env_file:
+      - .env
+    environment:
+      # The container reaches Postgres by service name, not localhost — inside
+      # the container, localhost is the API itself. Overrides the .env value,
+      # which points at the published port for host-side `go run`.
+      DATABASE_URL: postgres://seera:seera@postgres:5432/seera?sslmode=disable
+      # Likewise: the container always listens on 8080 and is published on 8081.
+      PORT: "8080"
+      ENV: dev
+      LOG_LEVEL: debug
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+    ports:
+      # 8081 on the host: 8080 is commonly taken on developer machines.
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
-  pgdata:
+  postgres_data:

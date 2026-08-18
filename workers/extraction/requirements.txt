@@ -1,0 +1,9 @@
+# Offline PDF extraction. Not deployed — see README.md.
+
+# Text and layout extraction.
+PyMuPDF~=1.24
+
+# OCR, used only for pages with an empty text layer.
+# Requires the Tesseract binary plus `eng` and `amh` language data on PATH.
+pytesseract~=0.3.10
+Pillow~=11.0

@@ -18,9 +18,11 @@ workers/**/*.pyc
 tmp/
 data/
 storage/
-eval/results/*.json
-!eval/results/.gitkeep
+workers/extraction/out/
+tests/evaluation/results/*.json
+!tests/evaluation/results/.gitkeep
 
 .DS_Store
 .idea/
 .vscode/
+workers/extraction/triage.json

@@ -27,7 +27,8 @@ layout detection, embedding batch jobs). It is a worker runtime, never the API.
 Repo layout (two working directories on this machine):
 
 - `seera-web/` — frontend
-- `seera-backend-services/` — Go API, services, migrations, and `workers/` for Python
+- `seera-backend-services/` — Go API, feature packages, migrations, and `workers/` for
+  offline Python (document extraction)
 
 ## Hard rules
 
@@ -76,16 +77,51 @@ Engineering:
 
 ## Where things go
 
+The backend is organised by **feature**, not by layer. A feature package owns its own
+handler, service, repository, model, and DTOs; there is no global `api/`, `service/`, or
+`repository/` package.
+
 | Concern | Location |
 |---|---|
-| HTTP handlers, DTOs, SSE | `internal/api/` |
-| Retrieval, answering, ingestion orchestration | `internal/service/` |
-| SQL, pgx queries | `internal/repository/` |
-| Domain types, interfaces | `internal/domain/` |
-| LLM/embedding adapters | `internal/provider/` |
-| Migrations | `migrations/` in seera-backend-services |
-| PDF/OCR/parsing | `workers/` (Python) |
+| Router, middleware, SSE plumbing, server lifecycle | `internal/server/` |
+| Feature HTTP handler + service + SQL + DTOs | `internal/<feature>/` (`qa`, `legal`, `documents`, `business`) |
+| Domain types (`Document`, `Version`, `Article`, `Chunk`, `Language`) | `internal/legal/` |
+| Retrieval orchestration, context building, grounding, abstention | `internal/rag/` |
+| Hybrid search: vector, keyword, fusion | `internal/search/` |
+| Citation resolution and the `Citation` payload | `internal/citations/` |
+| Ingestion orchestration: chunking, embedding, indexing | `internal/ingestion/` |
+| LLM/embedding adapters and their interfaces | `internal/ai/` |
+| Object storage | `internal/storage/` |
+| pgx pool | `internal/database/` |
+| Migrations | `internal/database/migrations/` |
+| Config | `internal/config/` |
+| Cross-cutting utilities | `pkg/logger`, `pkg/validator`, `pkg/errors` |
+| PDF/OCR/structure parsing | `workers/extraction/` (Python, run offline — not a service) |
+| Integration tests, RAG evaluation | `tests/integration/`, `tests/evaluation/` |
 | UI | `seera-web/src/` |
+
+## Dependency direction
+
+Imports flow one way. Check this before adding an import — a cycle is a design error the
+compiler only reports once it is expensive to unwind.
+
+```
+cmd/api
+   └→ internal/server ─→ internal/qa ─→ internal/rag ─→ internal/search ─→ internal/legal
+                                            │              │                    │
+                                            ├→ internal/citations ──────────────┤
+                                            └→ internal/ai                      │
+                     internal/ingestion ─→ internal/ai, internal/legal ─────────┤
+                                                                    internal/database
+```
+
+- `internal/legal` is the domain floor: it imports no sibling package. `model.go` is
+  stdlib-only; `repository.go` uses pgx, which is external, not a sibling.
+- `internal/rag` orchestrates and never touches pgx — it goes through `internal/search`
+  and `internal/citations`.
+- `internal/search` embeds the query itself, so it imports `internal/ai`. Retrieval is
+  question-in, results-out; callers do not pre-compute vectors for it.
+- `internal/ai` never imports a feature package; vendor SDK types stay inside its adapters.
 
 ## Related skills
 
