@@ -56,7 +56,7 @@ func FuseRRF(lists ...[]Result) []Result {
 		// one. Naming the arm that happened to be scanned first would be a lie
 		// in exactly the case worth knowing about.
 		if len(entry.retrievers) > 1 {
-			result.Retriever = "hybrid"
+			result.Retriever = RetrieverHybrid
 		}
 		out = append(out, result)
 	}

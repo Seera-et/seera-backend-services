@@ -28,15 +28,17 @@ func (s *stubRouter) Route(_ context.Context, in router.Input) router.Decision {
 }
 
 type stubGeneral struct {
-	reply  chat.Reply
-	err    error
-	calls  atomic.Int32
-	gotMsg string
+	reply       chat.Reply
+	err         error
+	calls       atomic.Int32
+	gotMsg      string
+	gotCategory chat.Category
 }
 
 func (s *stubGeneral) Reply(_ context.Context, in chat.Input) (chat.Reply, error) {
 	s.calls.Add(1)
 	s.gotMsg = in.Message
+	s.gotCategory = in.Category
 	return s.reply, s.err
 }
 
@@ -117,6 +119,42 @@ func TestGeneralMessageIsAnsweredWithoutRetrieval(t *testing.T) {
 	}
 	if done.Result.Grounded || done.Result.Abstained {
 		t.Error("a conversational reply must claim neither grounding nor abstention")
+	}
+}
+
+// A clarification-needed message is a refinement of IntentGeneral, so it must
+// reuse every safety property that intent already has: no retrieval, no
+// sources, kind stays "conversation" — and the category must reach the chat
+// engine so its reply is a single clarifying question, not an attempted answer.
+func TestClarificationCategoryReachesChatWithNoRetrieval(t *testing.T) {
+	general := &stubGeneral{reply: chat.Reply{Text: "What are you trying to register — a company, a business name, or a trademark?"}}
+	legalEngine := &stubLegal{}
+
+	svc := newService(t, &stubRouter{decision: router.Decision{
+		Intent:   router.IntentGeneral,
+		Category: router.CategoryClarificationNeeded,
+	}}, general, legalEngine)
+
+	events := collect(t, svc, rag.Question{Text: "How do I register it?"})
+
+	if legalEngine.calls.Load() != 0 {
+		t.Error("a clarification-needed message reached retrieval")
+	}
+	if general.gotCategory != chat.CategoryClarificationNeeded {
+		t.Errorf("chat category = %q, want %q", general.gotCategory, chat.CategoryClarificationNeeded)
+	}
+
+	route := events[0].Route
+	if route.Intent != string(router.CategoryClarificationNeeded) {
+		t.Errorf("route intent = %q, want the fine-grained category", route.Intent)
+	}
+
+	done := events[len(events)-1]
+	if done.Result.Kind != rag.KindConversation {
+		t.Errorf("kind = %q, want %q", done.Result.Kind, rag.KindConversation)
+	}
+	if done.Result.Intent != string(router.CategoryClarificationNeeded) {
+		t.Errorf("result intent = %q, want the fine-grained category", done.Result.Intent)
 	}
 }
 
@@ -217,6 +255,42 @@ func TestDecisionShapesTheLegalQuestion(t *testing.T) {
 	}
 	if len(legalEngine.got.CarriedChunks) != 2 {
 		t.Errorf("carried %d chunks, want 2", len(legalEngine.got.CarriedChunks))
+	}
+}
+
+func TestSkipRetrievalIsSetOnlyWhenSourcesSufficientAndCarriedChunksExist(t *testing.T) {
+	tests := []struct {
+		name              string
+		sourcesSufficient bool
+		usePriorSources   bool
+		carriedChunks     []legal.ChunkID
+		want              bool
+	}{
+		{"both present", true, true, []legal.ChunkID{"chunk-1"}, true},
+		{"sufficient but no carried chunks sent this turn", true, true, nil, false},
+		{"carried chunks present but not judged sufficient", false, true, []legal.ChunkID{"chunk-1"}, false},
+		{"sufficient claimed but the question moved on", true, false, []legal.ChunkID{"chunk-1"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			legalEngine := &stubLegal{}
+			svc := newService(t, &stubRouter{decision: router.Decision{
+				Intent:            router.IntentDiscussion,
+				SearchText:        "What are its advantages?",
+				UsePriorSources:   tt.usePriorSources,
+				SourcesSufficient: tt.sourcesSufficient,
+			}}, &stubGeneral{}, legalEngine)
+
+			collect(t, svc, rag.Question{
+				Text:          "what about its advantages?",
+				CarriedChunks: tt.carriedChunks,
+			})
+
+			if legalEngine.got.SkipRetrieval != tt.want {
+				t.Errorf("SkipRetrieval = %v, want %v", legalEngine.got.SkipRetrieval, tt.want)
+			}
+		})
 	}
 }
 

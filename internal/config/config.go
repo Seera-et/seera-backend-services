@@ -46,6 +46,20 @@ type Config struct {
 	AnthropicAPIKey Secret
 	CohereAPIKey    Secret
 
+	// OpenRouterAPIKey enables a generation fallback, not a first-class
+	// provider: when set, the LLM used for routing/chat/answer generation
+	// tries Gemini first and falls back to OpenRouter only if that call fails
+	// outright (an exhausted quota, an expired key) — never mid-stream, and
+	// never for embeddings, since the corpus is embedded in Gemini's vector
+	// space specifically. Absent, behavior is unchanged from before this
+	// existed. Deliberately not in MissingAIKeys(): it is optional backup, not
+	// a documented provider option someone should be nudged to configure.
+	OpenRouterAPIKey Secret
+
+	// OpenRouterModel overrides the fallback model. Empty uses the package
+	// default.
+	OpenRouterModel string
+
 	// MultiHop enables the answer path's second retrieval pass: after the first
 	// results come back, the model is asked what is still missing and that is
 	// retrieved too.
@@ -114,6 +128,9 @@ func Load() (Config, error) {
 		AnthropicAPIKey: Secret(os.Getenv("ANTHROPIC_API_KEY")),
 		CohereAPIKey:    Secret(os.Getenv("COHERE_API_KEY")),
 		AdminToken:      Secret(os.Getenv("ADMIN_API_TOKEN")),
+
+		OpenRouterAPIKey: Secret(os.Getenv("OPENROUTER_API_KEY")),
+		OpenRouterModel:  envString("OPENROUTER_MODEL", ""),
 
 		CORSAllowedOrigins: envStrings("CORS_ALLOWED_ORIGINS", []string{"http://localhost:5173"}),
 	}

@@ -53,6 +53,11 @@ type Turn struct {
 type Input struct {
 	Message string
 	History []Turn
+
+	// Category refines what kind of non-legal message this is, from the
+	// router's classification. The zero value gets the base prompt with no
+	// category-specific guidance.
+	Category Category
 }
 
 // Reply is what the engine produced.
@@ -88,12 +93,19 @@ func (e *Engine) Reply(ctx context.Context, in Input) (Reply, error) {
 		return Reply{}, fmt.Errorf("chat: message is empty")
 	}
 
+	// Canned rather than generated: nothing about an out-of-scope message
+	// needs a model, and a canned reply cannot be talked into answering it
+	// anyway, unlike an instruction a model could in principle be argued out of.
+	if in.Category == CategoryOutOfScope {
+		return Reply{Text: OutOfScopeMessage}, nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 
 	start := time.Now()
 	raw, _, err := e.llm.Complete(ctx, ai.Request{
-		System:    systemPrompt,
+		System:    systemPromptFor(in.Category),
 		Messages:  []ai.Message{{Role: ai.RoleUser, Content: buildPrompt(in)}},
 		MaxTokens: MaxOutputTokens,
 	})

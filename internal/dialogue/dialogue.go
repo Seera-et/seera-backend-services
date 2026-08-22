@@ -130,7 +130,7 @@ func (s *Service) Answer(ctx context.Context, q rag.Question, emit func(rag.Even
 	})
 
 	if err := emit(rag.Event{Type: rag.EventRoute, Route: &rag.Route{
-		Intent:         string(decision.Intent),
+		Intent:         routeLabel(decision),
 		Depth:          rag.Depth(decision.Depth),
 		SearchText:     rewriteToShow(q.Text, decision.SearchText),
 		CarriedSources: carriedCount(decision, q),
@@ -139,7 +139,7 @@ func (s *Service) Answer(ctx context.Context, q rag.Question, emit func(rag.Even
 	}
 
 	if decision.Intent == router.IntentGeneral {
-		answered, err := s.answerGenerally(ctx, q, emit)
+		answered, err := s.answerGenerally(ctx, q, decision, emit)
 		if err != nil {
 			return err
 		}
@@ -169,6 +169,10 @@ func (s *Service) legalQuestion(
 		q.CarriedChunks = nil
 	}
 
+	// Re-checked here, not just read off the decision: CarriedChunks may have
+	// just been zeroed above, or the client may simply have sent none this turn.
+	q.SkipRetrieval = decision.SourcesSufficient && len(q.CarriedChunks) > 0
+
 	q.Candidates = pending.results(q.Text, decision)
 	return q
 }
@@ -181,13 +185,15 @@ func (s *Service) legalQuestion(
 func (s *Service) answerGenerally(
 	ctx context.Context,
 	q rag.Question,
+	decision router.Decision,
 	emit func(rag.Event) error,
 ) (bool, error) {
 	start := time.Now()
 
 	reply, err := s.general.Reply(ctx, chat.Input{
-		Message: q.Text,
-		History: toChatTurns(q.History),
+		Message:  q.Text,
+		History:  toChatTurns(q.History),
+		Category: chat.Category(decision.Category),
 	})
 	if err != nil {
 		// The general path failing is not a reason to fail the message: the
@@ -215,7 +221,7 @@ func (s *Service) answerGenerally(
 		Citations: []rag.Citation{},
 		Result: &rag.Result{
 			Kind:   rag.KindConversation,
-			Intent: string(router.IntentGeneral),
+			Intent: routeLabel(decision),
 			// Neither applies: nothing was searched, and nothing was claimed.
 			// Both false so that a client reading only the booleans cannot
 			// present this as a grounded legal answer.
@@ -225,6 +231,17 @@ func (s *Service) answerGenerally(
 			Timings:   rag.Timings{Total: time.Since(start).Milliseconds()},
 		},
 	})
+}
+
+// routeLabel is what the client sees in the open "intent" string field: the
+// fine-grained category when the router resolved one, the coarse intent
+// otherwise. No frontend schema change is needed for this — that field is
+// validated only as a string, not a closed enum.
+func routeLabel(decision router.Decision) string {
+	if decision.Category != "" {
+		return string(decision.Category)
+	}
+	return string(decision.Intent)
 }
 
 // rewriteToShow returns the search text only when it differs from what the

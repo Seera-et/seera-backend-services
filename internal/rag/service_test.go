@@ -301,6 +301,34 @@ func TestAnswerSendsSourcesAndQuestionToTheModel(t *testing.T) {
 	}
 }
 
+func TestDepthGuidance(t *testing.T) {
+	if got := depthGuidance(DepthExplain); got != "" {
+		t.Errorf("DepthExplain guidance = %q, want empty — today's default behavior must not change", got)
+	}
+	if got := depthGuidance(DepthQuote); !strings.Contains(got, "Lead with it") {
+		t.Errorf("DepthQuote guidance = %q, missing the lead-with-the-provision instruction", got)
+	}
+	if got := depthGuidance(DepthAnalyse); !strings.Contains(got, "how they fit together") {
+		t.Errorf("DepthAnalyse guidance = %q, missing the multi-provision instruction", got)
+	}
+}
+
+func TestUserPromptHedgesBelowHighConfidence(t *testing.T) {
+	q := Question{Text: "what is the minimum capital?"}
+
+	for _, level := range []ConfidenceLevel{ConfidenceMedium, ConfidenceLow} {
+		prompt := userPrompt(q, "sources block", Confidence{Level: level})
+		if !strings.Contains(prompt, "thinner than usual") {
+			t.Errorf("confidence %q: prompt is missing the hedge", level)
+		}
+	}
+
+	high := userPrompt(q, "sources block", Confidence{Level: ConfidenceHigh})
+	if strings.Contains(high, "thinner than usual") {
+		t.Error("high confidence should not carry the hedge")
+	}
+}
+
 // A disconnected client stops the answer instead of paying for tokens nobody
 // will read.
 func TestAnswerStopsWhenTheClientGoesAway(t *testing.T) {

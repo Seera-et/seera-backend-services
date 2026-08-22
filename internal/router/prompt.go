@@ -40,6 +40,27 @@ When the message could be either, choose "legal". Searching the corpus and
 finding nothing is a small cost. Answering a legal question from memory is not
 acceptable at all.
 
+When you choose "general", also choose one "category":
+
+- "greeting": a greeting, thanks, farewell, or pure pleasantry with no
+  question in it.
+- "general_knowledge": a concept question that does not depend on Ethiopian
+  law in particular, OR a request for something Seera does not do yet —
+  drafting a document, reviewing an uploaded document, advice tailored to the
+  reader's own situation. Explain the general concept if there is one; if it
+  was a request for an unsupported service, that is still "general_knowledge",
+  not a new kind of question.
+- "product_question": what Seera is, what it can do, how it works, its
+  coverage, its languages.
+- "out_of_scope": unrelated to Ethiopian law and to Seera itself — sports,
+  weather, another country's law, chit-chat with no legal or product angle.
+- "clarification_needed": depends on an antecedent not present anywhere in
+  this conversation — "how do I register it", "what about the second type" —
+  with nothing earlier to resolve "it" or "the second type" against. Do not
+  guess the antecedent, and do not choose "legal" to search for a guess.
+
+Leave "category" empty for "legal" and "discussion".
+
 Choose one depth, which controls how much the answer explains:
 
 - "quote": the reader wants the provision itself.
@@ -55,6 +76,15 @@ the conversation. For "general", leave it empty.
 
 Set "use_prior_sources" to true when answering will need the sources already
 cited in this conversation.
+
+For "discussion", also set "sources_sufficient" to true only when nothing more
+needs to be searched for — the question asks what the cited sources mean, how
+they compare, or whether they still apply, and answering needs nothing beyond
+what has already been found. Leave it false whenever the question could need a
+provision not yet cited, however closely related — "does this also apply to a
+private limited company" still needs a search. When unsure, false: searching
+again and finding nothing new costs a moment; not searching when something new
+was needed costs the answer. Leave it false for every other intent.
 
 "reason" is at most one short clause, for a log.`
 
@@ -81,6 +111,17 @@ var decisionSchema = &ai.Schema{
 			},
 			Description: "How much the answer should explain.",
 		},
+		"category": {
+			Type: "string",
+			Enum: []string{
+				string(CategoryGreeting),
+				string(CategoryGeneralKnowledge),
+				string(CategoryProductQuestion),
+				string(CategoryOutOfScope),
+				string(CategoryClarificationNeeded),
+			},
+			Description: "Only set when intent is \"general\": what kind of non-legal message this is.",
+		},
 		"search_text": {
 			Type:        "string",
 			Description: "The message as a standalone question for retrieval. Empty for general.",
@@ -88,6 +129,10 @@ var decisionSchema = &ai.Schema{
 		"use_prior_sources": {
 			Type:        "boolean",
 			Description: "Whether the sources already cited are needed to answer.",
+		},
+		"sources_sufficient": {
+			Type:        "boolean",
+			Description: "Only for \"discussion\": true when nothing more needs to be searched for.",
 		},
 		"reason": {
 			Type:        "string",

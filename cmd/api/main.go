@@ -152,7 +152,11 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 		if cfg.GeminiModel != "" {
 			llmOpts = append(llmOpts, ai.WithGeminiModel(cfg.GeminiModel))
 		}
-		llm, err := ai.NewGeminiLLM(cfg.GeminiAPIKey.Value(), llmOpts...)
+		geminiLLM, err := ai.NewGeminiLLM(cfg.GeminiAPIKey.Value(), llmOpts...)
+		if err != nil {
+			return server.Handlers{}, err
+		}
+		llm, err := buildLLM(cfg, log, geminiLLM)
 		if err != nil {
 			return server.Handlers{}, err
 		}
@@ -206,6 +210,27 @@ func buildEmbedder(cfg config.Config, log *slog.Logger) (ai.Embedder, error) {
 	default:
 		return nil, nil
 	}
+}
+
+// buildLLM wraps the Gemini generation client with an OpenRouter fallback when
+// OPENROUTER_API_KEY is set. Embeddings never go through this path — the
+// corpus is embedded in Gemini's vector space specifically, and swapping that
+// would silently mismatch every stored vector, not gracefully degrade one.
+func buildLLM(cfg config.Config, log *slog.Logger, primary ai.LLM) (ai.LLM, error) {
+	if cfg.OpenRouterAPIKey.Empty() {
+		return primary, nil
+	}
+
+	opts := []ai.OpenRouterOption{}
+	if cfg.OpenRouterModel != "" {
+		opts = append(opts, ai.WithOpenRouterModel(cfg.OpenRouterModel))
+	}
+	fallback, err := ai.NewOpenRouterLLM(cfg.OpenRouterAPIKey.Value(), opts...)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("OpenRouter fallback enabled", slog.String("model", fallback.Model()))
+	return ai.NewFallbackLLM(primary, fallback, log), nil
 }
 
 // buildReranker picks the reranker and the abstention threshold that goes with it.

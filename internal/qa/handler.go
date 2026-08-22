@@ -93,6 +93,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				payload.Intent = event.Result.Intent
 				payload.Depth = event.Result.Depth
 				payload.Related = event.Result.Related
+				payload.Confidence = event.Result.Confidence
 			}
 			if payload.Citations == nil {
 				payload.Citations = []rag.Citation{}

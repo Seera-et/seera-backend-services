@@ -57,6 +57,77 @@ func TestRoutingDatasetIsWellFormed(t *testing.T) {
 	t.Logf("routing dataset: %d cases (%s)", len(dataset.Cases), summarise(counts))
 }
 
+// Runs in the ordinary suite, without a provider key or a database — this only
+// checks the dataset parses and has a sane shape. Answer-quality itself needs
+// a real corpus and is checked by TestAnswerQuality, behind the eval tag.
+func TestAnswerDatasetIsWellFormed(t *testing.T) {
+	dataset, err := LoadAnswerDataset()
+	if err != nil {
+		t.Fatalf("answer dataset: %v", err)
+	}
+
+	var (
+		amharic       int
+		abstain       int
+		citationStyle int
+		unverified    int
+	)
+	for _, tc := range dataset.Cases {
+		if tc.Language == "am" {
+			amharic++
+		}
+		if tc.ShouldAbstain {
+			abstain++
+		}
+		if len(tc.ExpectedArticleNos) > 0 {
+			citationStyle++
+		} else if !tc.ShouldAbstain {
+			// A case with a document but no article number is real but
+			// unverified ground truth — see the comment on answerCase. Worth
+			// counting so the gap in coverage is visible, not silent.
+			unverified++
+		}
+	}
+
+	if amharic < 2 {
+		t.Errorf("dataset has %d Amharic cases; too few to say anything about that language", amharic)
+	}
+	if abstain < 3 {
+		t.Errorf("dataset has %d should_abstain cases, want at least 3", abstain)
+	}
+
+	t.Logf("answer dataset: %d cases (amharic: %d, abstain: %d, citation-style: %d, "+
+		"document-only/unverified: %d)", len(dataset.Cases), amharic, abstain, citationStyle, unverified)
+	if unverified > 0 {
+		t.Logf("%d case(s) have a document title but no verified article number — "+
+			"fill these in against the real ingested corpus before trusting citation-accuracy "+
+			"results for them; see the answerCase doc comment in dataset.go", unverified)
+	}
+}
+
+// Runs unconditionally — no provider key, no database. Confirms the
+// behavioral dataset parses, every pattern is one this project knows how to
+// check, and there is more than a token case per pattern.
+func TestEdgeCaseDatasetIsWellFormed(t *testing.T) {
+	dataset, err := LoadEdgeCaseDataset()
+	if err != nil {
+		t.Fatalf("edge case dataset: %v", err)
+	}
+
+	counts := map[edgePattern]int{}
+	for _, tc := range dataset.Cases {
+		counts[tc.Pattern]++
+	}
+
+	for pattern := range knownEdgePatterns {
+		if counts[pattern] == 0 {
+			t.Errorf("no cases for pattern %q — every pattern this project knows how to check should have at least one", pattern)
+		}
+	}
+
+	t.Logf("edge case dataset: %d cases across %d patterns", len(dataset.Cases), len(counts))
+}
+
 func summarise(counts map[string]int) string {
 	parts := make([]string, 0, len(counts))
 	for _, intent := range []string{"legal", "discussion", "general"} {

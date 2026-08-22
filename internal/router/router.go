@@ -50,6 +50,36 @@ const (
 	IntentGeneral Intent = "general"
 )
 
+// Category refines an IntentGeneral decision into what kind of non-legal
+// message this is, so the general engine can vary its tone. Legal and
+// Discussion decisions always carry the zero value — the engine on that side
+// has no use for it.
+type Category string
+
+const (
+	// CategoryGreeting is a greeting, thanks, farewell, or pure pleasantry
+	// with no question in it.
+	CategoryGreeting Category = "greeting"
+
+	// CategoryGeneralKnowledge is a concept question that does not depend on
+	// Ethiopian law in particular, or a request for a service Seera does not
+	// provide (drafting, document review, advice on the reader's own
+	// situation).
+	CategoryGeneralKnowledge Category = "general_knowledge"
+
+	// CategoryProductQuestion asks what Seera is, what it can do, or how it
+	// works.
+	CategoryProductQuestion Category = "product_question"
+
+	// CategoryOutOfScope is unrelated to Ethiopian law and to Seera itself.
+	CategoryOutOfScope Category = "out_of_scope"
+
+	// CategoryClarificationNeeded depends on an antecedent nothing earlier in
+	// the conversation resolves — "how do I register it" with no "it" to
+	// point at.
+	CategoryClarificationNeeded Category = "clarification_needed"
+)
+
 // Depth is how much the answer should do with what it retrieves.
 type Depth string
 
@@ -70,6 +100,10 @@ type Decision struct {
 	Intent Intent
 	Depth  Depth
 
+	// Category refines Intent == IntentGeneral into what kind of non-legal
+	// message this is. Empty for Legal and Discussion.
+	Category Category
+
 	// SearchText is what retrieval should search for: the question itself when
 	// it stands alone, otherwise a rewrite that resolves the references in it.
 	SearchText string
@@ -77,6 +111,12 @@ type Decision struct {
 	// UsePriorSources asks the answer path to carry the citations already in
 	// this conversation into the context.
 	UsePriorSources bool
+
+	// SourcesSufficient narrows UsePriorSources further: true means the answer
+	// path can skip a fresh search entirely and rely only on what is already
+	// cited. Only ever true for IntentDiscussion. False is always safe — it
+	// just means a search runs that might not have been needed.
+	SourcesSufficient bool
 
 	// Reason is one short clause, for the log. Never shown to a user.
 	Reason string
@@ -202,11 +242,13 @@ func fallback(in Input, reason string) Decision {
 // code does not understand must reach the fallback, not be guessed at.
 func parseDecision(raw, question string, in Input) (Decision, error) {
 	var payload struct {
-		Intent          string `json:"intent"`
-		Depth           string `json:"depth"`
-		SearchText      string `json:"search_text"`
-		UsePriorSources bool   `json:"use_prior_sources"`
-		Reason          string `json:"reason"`
+		Intent            string `json:"intent"`
+		Depth             string `json:"depth"`
+		Category          string `json:"category"`
+		SearchText        string `json:"search_text"`
+		UsePriorSources   bool   `json:"use_prior_sources"`
+		SourcesSufficient bool   `json:"sources_sufficient"`
+		Reason            string `json:"reason"`
 	}
 
 	trimmed := strings.TrimSpace(raw)
@@ -242,6 +284,7 @@ func parseDecision(raw, question string, in Input) (Decision, error) {
 
 	// A general reply searches for nothing.
 	if intent == IntentGeneral {
+		decision.Category = parseCategory(payload.Category)
 		return decision, nil
 	}
 
@@ -252,12 +295,31 @@ func parseDecision(raw, question string, in Input) (Decision, error) {
 	}
 
 	// A question about earlier sources needs them whether or not the model
-	// remembered to ask: that is what makes it a discussion.
+	// remembered to ask: that is what makes it a discussion. SourcesSufficient
+	// can never be true without them either — left false (its zero value) for
+	// every other intent and for a sourceless discussion.
 	if intent == IntentDiscussion && len(in.PriorSources) > 0 {
 		decision.UsePriorSources = true
+		decision.SourcesSufficient = payload.SourcesSufficient
 	}
 
 	return decision, nil
+}
+
+// parseCategory validates a category string, degrading to the zero value
+// rather than failing the whole decision. Unlike Intent and Depth, an
+// unrecognized category does not send the message to fallback(): a category
+// only ever changes tone inside an already-guarded, non-legal reply
+// (guard.AssertsLaw still runs regardless), so a malformed tone label
+// shouldn't force a full legal retrieval that would most likely just abstain.
+func parseCategory(raw string) Category {
+	switch c := Category(strings.ToLower(strings.TrimSpace(raw))); c {
+	case CategoryGreeting, CategoryGeneralKnowledge, CategoryProductQuestion,
+		CategoryOutOfScope, CategoryClarificationNeeded:
+		return c
+	default:
+		return ""
+	}
 }
 
 func truncate(s string, max int) string {

@@ -224,6 +224,139 @@ func TestPromptCarriesTheConversationAndSources(t *testing.T) {
 	}
 }
 
+func TestCategoryIsParsedForGeneralIntent(t *testing.T) {
+	for _, category := range []Category{
+		CategoryGreeting, CategoryGeneralKnowledge, CategoryProductQuestion,
+		CategoryOutOfScope, CategoryClarificationNeeded,
+	} {
+		t.Run(string(category), func(t *testing.T) {
+			llm := &stubLLM{response: decisionJSON(t, map[string]any{
+				"intent": "general", "depth": "explain", "search_text": "",
+				"use_prior_sources": false, "category": string(category),
+			})}
+
+			got := newRouter(llm).Route(context.Background(), Input{Question: "hi"})
+
+			if got.Category != category {
+				t.Errorf("category = %q, want %q", got.Category, category)
+			}
+		})
+	}
+}
+
+func TestUnknownCategoryDegradesRatherThanFails(t *testing.T) {
+	// A category only ever changes tone inside an already-guarded, non-legal
+	// reply, so a value the model invented should not force the whole
+	// decision into the legal fallback.
+	llm := &stubLLM{response: decisionJSON(t, map[string]any{
+		"intent": "general", "depth": "explain", "search_text": "",
+		"use_prior_sources": false, "category": "philosophical_musing",
+	})}
+
+	got := newRouter(llm).Route(context.Background(), Input{Question: "hi"})
+
+	if got.Fallback {
+		t.Error("an unrecognized category should not trigger the legal fallback")
+	}
+	if got.Intent != IntentGeneral {
+		t.Errorf("intent = %q, want %q", got.Intent, IntentGeneral)
+	}
+	if got.Category != "" {
+		t.Errorf("category = %q, want empty for an unrecognized value", got.Category)
+	}
+}
+
+func TestCategoryStaysEmptyForLegalAndDiscussion(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields map[string]any
+	}{
+		{
+			name: "legal",
+			fields: map[string]any{
+				"intent": "legal", "depth": "explain",
+				"search_text": "What does Article 5 say?", "use_prior_sources": false,
+				"category": "general_knowledge",
+			},
+		},
+		{
+			name: "discussion",
+			fields: map[string]any{
+				"intent": "discussion", "depth": "explain",
+				"search_text": "What does Article 5 say?", "use_prior_sources": true,
+				"category": "greeting",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &stubLLM{response: decisionJSON(t, tt.fields)}
+			got := newRouter(llm).Route(context.Background(), Input{
+				Question:     "What does Article 5 say?",
+				PriorSources: []string{"Commercial Code, Article 265"},
+			})
+
+			if got.Category != "" {
+				t.Errorf("category = %q, want empty even though the model set one", got.Category)
+			}
+		})
+	}
+}
+
+func TestSourcesSufficientRequiresPriorSources(t *testing.T) {
+	llm := &stubLLM{response: decisionJSON(t, map[string]any{
+		"intent": "discussion", "depth": "explain",
+		"search_text": "What are the advantages of a PLC?", "use_prior_sources": true,
+		"sources_sufficient": true,
+	})}
+
+	// No PriorSources on the Input — the model claiming sources_sufficient
+	// cannot be trusted about sources the router itself has no record of.
+	got := newRouter(llm).Route(context.Background(), Input{Question: "what about its advantages?"})
+
+	if got.SourcesSufficient {
+		t.Error("sources_sufficient was honored with no prior sources present")
+	}
+}
+
+func TestSourcesSufficientOnlySettableForDiscussion(t *testing.T) {
+	llm := &stubLLM{response: decisionJSON(t, map[string]any{
+		"intent": "legal", "depth": "explain",
+		"search_text": "What does Article 5 say?", "use_prior_sources": false,
+		"sources_sufficient": true,
+	})}
+
+	got := newRouter(llm).Route(context.Background(), Input{
+		Question:     "What does Article 5 say?",
+		PriorSources: []string{"Commercial Code, Article 265"},
+	})
+
+	if got.Intent != IntentLegal {
+		t.Fatalf("intent = %q, want %q", got.Intent, IntentLegal)
+	}
+	if got.SourcesSufficient {
+		t.Error("sources_sufficient was honored for a non-discussion intent")
+	}
+}
+
+func TestSourcesSufficientIsHonoredForDiscussionWithPriorSources(t *testing.T) {
+	llm := &stubLLM{response: decisionJSON(t, map[string]any{
+		"intent": "discussion", "depth": "explain",
+		"search_text": "What are the advantages of a PLC?", "use_prior_sources": true,
+		"sources_sufficient": true,
+	})}
+
+	got := newRouter(llm).Route(context.Background(), Input{
+		Question:     "what about its advantages?",
+		PriorSources: []string{"Commercial Code, Article 265"},
+	})
+
+	if !got.SourcesSufficient {
+		t.Error("sources_sufficient was not honored for discussion with prior sources present")
+	}
+}
+
 func TestEmptyQuestionDoesNotCallTheModel(t *testing.T) {
 	llm := &stubLLM{response: "{}"}
 	got := newRouter(llm).Route(context.Background(), Input{Question: "   "})

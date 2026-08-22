@@ -1,0 +1,148 @@
+# Answer-quality evaluation, v1.
+#
+# Read by tests/evaluation/answer_test.go (`//go:build eval`) against a real,
+# already-ingested corpus. This is the harness docs/QA_FEATURE_PLAN.md §8
+# specified and that was never built — only the routing eval (routing_v1.yaml)
+# existed before this file.
+#
+# IMPORTANT — this file is deliberately smaller and more conservative than the
+# ~50-question mix QA_FEATURE_PLAN.md §8 originally sketched, and it says so
+# rather than padding to a round number:
+#
+#   - Ground truth here is corpus-dependent in a way routing labels are not. An
+#     article number is only correct against a specific ingested version, and
+#     this dataset was authored without access to a running database — exactly
+#     the situation QA_FEATURE_PLAN.md's own risk table warns about ("50
+#     questions have no in-corpus answer -> build the dataset against the
+#     ingested corpus, not before it"). Inventing specific article numbers to
+#     hit a target count would mean fabricating the exact kind of legal claim
+#     this whole system exists to prevent — in its own test fixtures.
+#   - `expected_document_titles` must match this database's actual
+#     `legal_documents.title` value exactly (`SELECT title FROM
+#     legal_documents`) — the titles below are written from the document
+#     descriptions in QA_FEATURE_PLAN.md's ingestion log, not copied from a
+#     live row, and may need correcting.
+#   - `expected_article_nos` is filled in for exactly the two cases verified
+#     against a real run (QA_FEATURE_PLAN.md "First real run", 2026-08-17,
+#     against Neon). Every other non-abstain case names a document only —
+#     real, answerable questions about topics a Commercial Code covers
+#     (formation, shares, partnerships, negotiable instruments, dissolution,
+#     governance, registration), deliberately avoiding topics like employment
+#     or tax that live in instruments not confirmed to be in this corpus.
+#   - Grow this file against your own ingested corpus: add the article numbers
+#     and expected_supporting_text once you've run a question for real and can
+#     see what came back. That is the intended workflow, not a gap to apologize
+#     for.
+#
+# Two Amharic cases only, for the same reason: composing more from scratch here
+# risks introducing exactly the kind of ungrounded confidence this project is
+# built against. See memory / docs/CORPUS.md on the state of Amharic sources.
+
+cases:
+  # ---- Verified against a real run (QA_FEATURE_PLAN.md, 2026-08-17) --------
+  - id: qa-001
+    question: "What powers does the Emperor have under the 1931 Constitution?"
+    language: en
+    expected_document_titles: ["Constitution of Ethiopia (1931)"]
+    expected_article_nos: ["5", "6", "9", "11", "16", "17"]
+    should_abstain: false
+    note: >
+      Verified: a real run against an ingested corpus returned a grounded
+      answer citing exactly these six articles (QA_FEATURE_PLAN.md, "First
+      real run"). expected_document_titles must still be checked against this
+      corpus's actual stored title.
+  - id: qa-002
+    question: "What does Article 16 of the 1931 Constitution say?"
+    language: en
+    expected_document_titles: ["Constitution of Ethiopia (1931)"]
+    expected_article_nos: ["16"]
+    should_abstain: false
+    note: "An exact-article query for this put Article 16 at rank 1 in the same verified run."
+  - id: qa-003
+    question: "አንቀጽ 16 ምን ይላል?"
+    language: am
+    expected_document_titles: ["Constitution of Ethiopia (1931)"]
+    expected_article_nos: ["16"]
+    should_abstain: false
+    note: "Amharic: what does Article 16 say? Same verified article as qa-002, same phrasing pattern already used in routing_v1.yaml's legal-008."
+
+  # ---- Document-level ground truth only — article numbers unverified -------
+  - id: qa-004
+    question: "What are the requirements for forming a private limited company in Ethiopia?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+    note: "Document-only ground truth — fill in the article number(s) after a real run."
+  - id: qa-005
+    question: "What is the minimum capital required to form a share company?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-006
+    question: "Can a foreign national own shares in an Ethiopian company?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-007
+    question: "What must be included in a company's memorandum of association?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-008
+    question: "How is a general partnership formed?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-009
+    question: "What happens if a company does not file its annual accounts?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-010
+    question: "What are the requirements for issuing a bill of exchange?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-011
+    question: "How is a share company dissolved?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-012
+    question: "What are the duties of a company's board of directors?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-013
+    question: "What is required to register a business name?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-014
+    question: "የንግድ ማኅበር እንዴት ይቋቋማል?"
+    language: am
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+    note: "Amharic: how is a business association formed? Same phrasing already used in routing_v1.yaml's legal-007."
+
+  # ---- Out of corpus (should abstain) ---------------------------------------
+  - id: qa-015
+    question: "What is the minimum wage under Kenyan labour law?"
+    language: en
+    should_abstain: true
+    note: "A different country's law — nothing in this corpus should answer it."
+  - id: qa-016
+    question: "What does French company law require for forming an SARL?"
+    language: en
+    should_abstain: true
+  - id: qa-017
+    question: "Under the United States Federal Sentencing Guidelines, what is the maximum sentence for tax evasion?"
+    language: en
+    should_abstain: true
+    note: >
+      Directly targets the contamination risk named in docs/CORPUS.md: a
+      United States Sentencing Commission PDF sits in the raw source folder and
+      must never be ingested. If this case ever stops abstaining, that file
+      likely got ingested by mistake — this citation would resolve correctly
+      to a real document that simply is not Ethiopian law, which grounding
+      validation cannot catch on its own.

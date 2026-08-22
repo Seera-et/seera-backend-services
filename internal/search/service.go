@@ -32,6 +32,11 @@ const (
 	RetrieverKeyword Retriever = "keyword"
 	RetrieverTrigram Retriever = "trigram"
 	RetrieverArticle Retriever = "article"
+
+	// RetrieverHybrid marks a result multiple arms agreed on, relabelled by
+	// fusion. Corroboration across retrievers is a stronger signal than any
+	// one arm's score, which is what rag.Confidence reads it for.
+	RetrieverHybrid Retriever = "hybrid"
 )
 
 // Result is one retrieved chunk with the metadata that follows it all the way

@@ -50,6 +50,61 @@ was in force and from when, works in English and Amharic, and says plainly when
 the corpus has nothing on point rather than guessing. Coverage is still partial.
 Seera is not a lawyer and does not give legal advice.`
 
+// Category mirrors router.Category. Kept as its own type rather than an
+// import so this package does not depend on router — dialogue converts with a
+// plain cast, the same pattern already used for Depth and Turn.
+type Category string
+
+const (
+	CategoryGreeting            Category = "greeting"
+	CategoryGeneralKnowledge    Category = "general_knowledge"
+	CategoryProductQuestion     Category = "product_question"
+	CategoryOutOfScope          Category = "out_of_scope"
+	CategoryClarificationNeeded Category = "clarification_needed"
+)
+
+// OutOfScopeMessage answers a message unrelated to Ethiopian law or to Seera.
+// Canned rather than generated: nothing about "who won the world cup" needs a
+// model, and a canned reply cannot be talked into trying it anyway.
+const OutOfScopeMessage = `That's outside what Seera does — I answer questions about Ethiopian law, using an indexed corpus of codes, proclamations, regulations and directives.
+
+Ask me something about Ethiopian law, or about what Seera can do, and I will help.`
+
+// systemPromptFor appends category-specific guidance to the base prompt. The
+// base prompt already covers every category reasonably; these are narrow
+// reinforcements for the cases worth being precise about, not a replacement.
+func systemPromptFor(category Category) string {
+	guidance, ok := categoryGuidance[category]
+	if !ok {
+		return systemPrompt
+	}
+	return systemPrompt + "\n\n" + guidance
+}
+
+var categoryGuidance = map[Category]string{
+	CategoryGreeting: `This message is a greeting, thanks, or pure pleasantry — nothing to
+answer yet. Reply briefly and warmly, one or two sentences. Do not explain what
+Seera does unless asked; do not lecture.`,
+
+	CategoryGeneralKnowledge: `This message asks about a general concept, or asks for something
+Seera does not do yet — drafting a document, reviewing an uploaded document, or
+advice tailored to the reader's own situation. If there is a general concept
+behind it, explain it plainly, label it explicitly as general knowledge and not
+Ethiopian law, and offer to search the corpus for the Ethiopian position. If the
+message asked for a service Seera does not provide, say so in one plain
+sentence — do not attempt it, and do not let a general explanation stand in for
+it.`,
+
+	CategoryProductQuestion: `This message asks what Seera is, what it can do, or how it works.
+Answer from the description of Seera given above and nothing else. Do not
+speculate about features it does not have.`,
+
+	CategoryClarificationNeeded: `This message refers to something — "it", "that one", "the second
+type" — that nothing earlier in this conversation resolves. Do not guess what it
+means. Reply with exactly one short clarifying question asking what they are
+referring to. Nothing else: no preamble, no attempted answer, no explanation.`,
+}
+
 // buildPrompt renders one general-reply request.
 func buildPrompt(in Input) string {
 	var b strings.Builder

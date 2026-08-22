@@ -35,6 +35,12 @@ type result struct {
 	Rewrite  string `json:"rewrite,omitempty"`
 	Correct  bool   `json:"correct"`
 
+	// ExpectedCategory/GotCategory are tracked separately from Correct: a
+	// category miss is a tone/UX issue, never a safety issue, so it never
+	// fails the build — only the summary reports it.
+	ExpectedCategory string `json:"expected_category,omitempty"`
+	GotCategory      string `json:"got_category,omitempty"`
+
 	// Dangerous marks the one failure that matters: a question that needed the
 	// corpus was sent to a model with no sources.
 	Dangerous bool   `json:"dangerous"`
@@ -67,10 +73,12 @@ func TestRouting(t *testing.T) {
 	t.Logf("routing evaluation: %d cases against %s", len(dataset.Cases), llm.Model())
 
 	var (
-		results   []result
-		correct   int
-		dangerous int
-		byGroup   = map[string][2]int{} // group -> [correct, total]
+		results         []result
+		correct         int
+		dangerous       int
+		byGroup         = map[string][2]int{} // group -> [correct, total]
+		categoryCorrect int
+		categoryTotal   int
 	)
 
 	for _, tc := range dataset.Cases {
@@ -96,6 +104,15 @@ func TestRouting(t *testing.T) {
 			Rewrite:   decision.SearchText,
 			Correct:   got == tc.Expect,
 			ElapsedMS: elapsed.Milliseconds(),
+		}
+
+		if tc.ExpectCategory != "" {
+			res.ExpectedCategory = tc.ExpectCategory
+			res.GotCategory = string(decision.Category)
+			categoryTotal++
+			if res.GotCategory == res.ExpectedCategory {
+				categoryCorrect++
+			}
 		}
 
 		// The gate. Everything else is a note.
@@ -138,6 +155,10 @@ func TestRouting(t *testing.T) {
 	}
 
 	report(t, results, byGroup, correct, dangerous)
+	if categoryTotal > 0 {
+		t.Logf("category accuracy %d/%d (%.0f%%) — never a hard gate, guard.AssertsLaw backstops every category",
+			categoryCorrect, categoryTotal, float64(categoryCorrect)/float64(categoryTotal)*100)
+	}
 
 	// The gate, and the only hard assertion. Accuracy is reported and watched;
 	// this one fails the build.

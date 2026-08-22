@@ -67,11 +67,15 @@ func DefaultConfig() Config {
 		TopN:               DefaultTopN,
 		Candidates:         50,
 		ContextTokenBudget: DefaultContextTokenBudget,
-		// Raised from 2048 when answers began stopping mid-sentence: the prompt
-		// now asks for the provision *and* an explanation of it, and a
-		// multi-article answer in Amharic — where a character costs about a
-		// token — does not fit in the old budget.
-		MaxOutputTokens: 4096,
+		// Raised from 2048, then from 4096 (2026-08-22, after a genuine
+		// comprehensive-coverage question — "what are the different types of
+		// business organizations and how is each one formed" — legitimately
+		// needed to cover five-plus distinct entity types and got cut off at
+		// 4096). The prompt asks for the provision *and* an explanation of it,
+		// a multi-article answer in Amharic costs about a token per character,
+		// and rule 13 now asks for richer, more structured answers on top of
+		// that — all of which raise the ceiling a genuinely broad question needs.
+		MaxOutputTokens: 6144,
 	}
 }
 
@@ -177,6 +181,14 @@ type Question struct {
 	// reader may be asking about. They are identifiers only: the text is read
 	// from the database, never taken from the client.
 	CarriedChunks []legal.ChunkID
+
+	// SkipRetrieval asks the answer path to rely solely on CarriedChunks,
+	// without a fresh search — set only when the router judged the sources
+	// already cited are enough. False is always safe: it degrades to a normal
+	// retrieval, never to a wrong answer. Ignored (as if false) when carried
+	// sources resolve to nothing, so a stale or empty carry still gets a real
+	// search rather than a spurious abstention.
+	SkipRetrieval bool
 
 	// Candidates lets a caller supply retrieval results it has already fetched —
 	// the speculative retrieval the dialogue layer starts while the router is
@@ -286,6 +298,11 @@ type Result struct {
 	Timings   Timings    `json:"timings_ms"`
 	Model     string     `json:"model"`
 	Reranker  string     `json:"reranker"`
+
+	// Confidence summarises how much evidence backs this answer. A pointer so
+	// it is simply absent on results that never reached generation
+	// (abstention, conversation) rather than a misleading zero value.
+	Confidence *Confidence `json:"confidence,omitempty"`
 }
 
 // Timings is the per-stage latency breakdown the SRS asks to be logged.
@@ -340,28 +357,40 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	// client sends identifiers; the text always comes from here.
 	carried := s.carriedSources(ctx, q.CarriedChunks)
 
-	candidates, retrievalMS, err := s.retrieve(ctx, q, searchText)
-	if err != nil {
-		return err
+	var top []search.Result
+	if q.SkipRetrieval && len(carried) > 0 {
+		// The router judged the sources already cited are enough — no fresh
+		// search, no rerank (there is nothing new to rank against), and no
+		// multi-hop (paying for a "what's missing" call directly contradicts
+		// the premise that nothing is missing).
+		top = carried
+		timings.CarriedN = len(carried)
+		s.log.DebugContext(ctx, "answering from carried sources only", slog.Int("carried", len(carried)))
+	} else {
+		candidates, retrievalMS, err := s.retrieve(ctx, q, searchText)
+		if err != nil {
+			return err
+		}
+		timings.Retrieval = retrievalMS
+		timings.CandidateN = len(candidates)
+
+		rerankStart := time.Now()
+		top = s.rerankTop(ctx, searchText, candidates, topN)
+		timings.Rerank = time.Since(rerankStart).Milliseconds()
+
+		// A second retrieval pass for what the first one missed. Off unless enabled.
+		if s.cfg.MultiHop && len(top) > 0 {
+			var expandMS int64
+			top, expandMS = s.expand(ctx, q, searchText, top, topN)
+			timings.Expand = expandMS
+		}
+
+		// Carried sources lead: they are what a follow-up is about, and putting
+		// them first means the context budget spends itself on them before
+		// anything else.
+		top = mergeSources(carried, top)
+		timings.CarriedN = len(carried)
 	}
-	timings.Retrieval = retrievalMS
-	timings.CandidateN = len(candidates)
-
-	rerankStart := time.Now()
-	top := s.rerankTop(ctx, searchText, candidates, topN)
-	timings.Rerank = time.Since(rerankStart).Milliseconds()
-
-	// A second retrieval pass for what the first one missed. Off unless enabled.
-	if s.cfg.MultiHop && len(top) > 0 {
-		var expandMS int64
-		top, expandMS = s.expand(ctx, q, searchText, top, topN)
-		timings.Expand = expandMS
-	}
-
-	// Carried sources lead: they are what a follow-up is about, and putting them
-	// first means the context budget spends itself on them before anything else.
-	top = mergeSources(carried, top)
-	timings.CarriedN = len(carried)
 
 	if s.shouldAbstain(top) {
 		return s.abstain(ctx, q, timings, start, emit)
@@ -372,6 +401,7 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	if len(built.Sources) == 0 {
 		return s.abstain(ctx, q, timings, start, emit)
 	}
+	confidence := confidenceFrom(top, len(built.Sources), s.cfg.MinRerankScore)
 
 	citations := make([]Citation, 0, len(built.Sources))
 	for _, ref := range built.Sources {
@@ -383,7 +413,7 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 
 	stream, err := s.llm.Stream(ctx, ai.Request{
 		System:    SystemPrompt,
-		Messages:  []ai.Message{{Role: ai.RoleUser, Content: userPrompt(q, built.Block)}},
+		Messages:  []ai.Message{{Role: ai.RoleUser, Content: userPrompt(q, built.Block, confidence)}},
 		MaxTokens: s.cfg.MaxOutputTokens,
 	})
 	if err != nil {
@@ -471,15 +501,16 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	}
 
 	result := Result{
-		Kind:      kind,
-		Depth:     q.Depth,
-		Truncated: truncated,
-		Related:   relatedQuestions(cited),
-		Grounded:  grounded,
-		Citations: cited,
-		Timings:   timings,
-		Model:     s.llm.Model(),
-		Reranker:  s.reranker.Name(),
+		Kind:       kind,
+		Depth:      q.Depth,
+		Truncated:  truncated,
+		Related:    relatedQuestions(cited),
+		Grounded:   grounded,
+		Citations:  cited,
+		Timings:    timings,
+		Model:      s.llm.Model(),
+		Reranker:   s.reranker.Name(),
+		Confidence: &confidence,
 	}
 
 	s.logAnswer(ctx, q, result, filter.Invalid(), built.Dropped)
@@ -564,7 +595,7 @@ func (s *Service) logAnswer(ctx context.Context, q Question, r Result, invalidMa
 // for what the law says. Rule 9 of the system prompt says so, and the marker
 // filter enforces it regardless: a claim can only cite a source retrieved for
 // this request.
-func userPrompt(q Question, sources string) string {
+func userPrompt(q Question, sources string, confidence Confidence) string {
 	var b strings.Builder
 	b.WriteString("Sources:\n\n")
 	b.WriteString(sources)
@@ -576,7 +607,25 @@ func userPrompt(q Question, sources string) string {
 
 	b.WriteString("Question: ")
 	b.WriteString(q.Text)
+	b.WriteString(depthGuidance(q.Depth))
+	if confidence.Level != ConfidenceHigh {
+		b.WriteString(confidenceGuidance)
+	}
 	return b.String()
+}
+
+// depthGuidance reinforces what topNFor already scales: how much the answer
+// should do with what it finds. DepthExplain, the default, gets nothing extra
+// — today's behavior is the baseline this leaves unchanged.
+func depthGuidance(depth Depth) string {
+	switch depth {
+	case DepthQuote:
+		return "\n\nThe reader wants the provision itself. Lead with it; keep the explanation short."
+	case DepthAnalyse:
+		return "\n\nThe reader is applying several provisions to a situation. Work through how they fit together, note any condition that changes the outcome, and say what follows practically from applying them together."
+	default:
+		return ""
+	}
 }
 
 func filterCitations(all []Citation, used []string) []Citation {

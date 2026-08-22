@@ -226,6 +226,10 @@ type donePayload struct {
 
 	// Related are follow-up questions built from the citations this answer used.
 	Related []rag.Suggestion `json:"related,omitempty"`
+
+	// Confidence summarises how much evidence backs this answer. Absent on
+	// results that never reached generation (abstention, conversation).
+	Confidence *rag.Confidence `json:"confidence,omitempty"`
 }
 
 // routePayload is the `route` event: what the router decided, sent before
