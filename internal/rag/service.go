@@ -48,6 +48,11 @@ type Config struct {
 	// MaxOutputTokens caps the generated answer.
 	MaxOutputTokens int
 
+	// MultiHop enables a second retrieval pass for what the first one missed.
+	// Off by default: it buys recall on questions that span several provisions
+	// and costs a model call plus a retrieval on every answer that uses it.
+	MultiHop bool
+
 	// MinRerankScore is the abstention threshold, compared against the top
 	// reranked score. It is meaningful only for a reranker that produces
 	// calibrated relevance scores: with the passthrough reranker the score is an
@@ -62,27 +67,86 @@ func DefaultConfig() Config {
 		TopN:               DefaultTopN,
 		Candidates:         50,
 		ContextTokenBudget: DefaultContextTokenBudget,
-		MaxOutputTokens:    2048,
+		// Raised from 2048 when answers began stopping mid-sentence: the prompt
+		// now asks for the provision *and* an explanation of it, and a
+		// multi-article answer in Amharic — where a character costs about a
+		// token — does not fit in the old budget.
+		MaxOutputTokens: 4096,
 	}
 }
+
+// topNFor scales the number of provisions the generator sees to what the reader
+// asked for. Quoting one article needs few; applying several to a situation needs
+// more, and the context budget still has the final say.
+func (c Config) topNFor(depth Depth) int {
+	switch depth {
+	case DepthQuote:
+		if c.TopN > 4 {
+			return 4
+		}
+	case DepthAnalyse:
+		if c.TopN < maxAnalyseTopN {
+			return maxAnalyseTopN
+		}
+	}
+	return c.TopN
+}
+
+// maxAnalyseTopN is the ceiling for an analysis question. Above this the
+// relevant provision starts competing with everything else in the window, which
+// is the failure the context budget exists to prevent.
+const maxAnalyseTopN = 10
 
 // Service answers legal questions from the corpus.
 type Service struct {
 	retriever Retriever
 	reranker  Reranker
 	llm       ai.LLM
+	sources   SourceResolver
+	articles  ArticleFinder
 	cfg       Config
 	log       *slog.Logger
 }
 
-func NewService(retriever Retriever, reranker Reranker, llm ai.LLM, cfg Config, log *slog.Logger) *Service {
+// Option configures optional collaborators.
+//
+// Optional because the service answers without them: without a SourceResolver a
+// follow-up re-retrieves instead of carrying its sources, and without an
+// ArticleFinder the second retrieval pass is simply not available. Both
+// degrade the answer; neither breaks it.
+type Option func(*Service)
+
+// WithSources supplies the resolver that re-reads chunks cited earlier in a
+// conversation.
+func WithSources(resolver SourceResolver) Option {
+	return func(s *Service) { s.sources = resolver }
+}
+
+// WithArticles supplies exact-article lookup, used by the second retrieval pass.
+func WithArticles(finder ArticleFinder) Option {
+	return func(s *Service) { s.articles = finder }
+}
+
+func NewService(
+	retriever Retriever,
+	reranker Reranker,
+	llm ai.LLM,
+	cfg Config,
+	log *slog.Logger,
+	opts ...Option,
+) *Service {
 	if cfg.TopN <= 0 {
 		cfg.TopN = DefaultTopN
 	}
 	if cfg.Candidates <= 0 {
 		cfg.Candidates = 50
 	}
-	return &Service{retriever: retriever, reranker: reranker, llm: llm, cfg: cfg, log: log}
+
+	s := &Service{retriever: retriever, reranker: reranker, llm: llm, cfg: cfg, log: log}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Question is one request for an answer.
@@ -99,7 +163,38 @@ type Question struct {
 	// context the generator reads. It is never evidence: a legal claim still has
 	// to cite a source retrieved for this request.
 	History []Turn
+
+	// SearchText is what retrieval should search for, as decided by the router:
+	// the question itself, or a rewrite that resolves the references in it.
+	// Empty means "use Text", which is what a caller without a router gets.
+	SearchText string
+
+	// Depth is how much the answer should do with what it finds. Empty behaves
+	// as DepthExplain.
+	Depth Depth
+
+	// CarriedChunks are chunks already cited in this conversation, which the
+	// reader may be asking about. They are identifiers only: the text is read
+	// from the database, never taken from the client.
+	CarriedChunks []legal.ChunkID
+
+	// Candidates lets a caller supply retrieval results it has already fetched —
+	// the speculative retrieval the dialogue layer starts while the router is
+	// still deciding. Nil means this service retrieves for itself.
+	Candidates []search.Result
 }
+
+// Depth is how much the answer should explain. Set by the router.
+type Depth string
+
+const (
+	// DepthQuote — the reader wants the provision itself.
+	DepthQuote Depth = "quote"
+	// DepthExplain — the reader wants to understand it. The default.
+	DepthExplain Depth = "explain"
+	// DepthAnalyse — the reader wants several provisions applied together.
+	DepthAnalyse Depth = "analyse"
+)
 
 // Event is one thing that happens while answering.
 type EventType string
@@ -114,7 +209,26 @@ const (
 
 	// EventDone carries the final citations and timings.
 	EventDone EventType = "done"
+
+	// EventRoute carries the routing decision, emitted before anything else so
+	// the client can say what is actually happening — searching the corpus for
+	// a rewritten question, or answering directly.
+	EventRoute EventType = "route"
 )
+
+// Route is what the router decided, as the client sees it.
+type Route struct {
+	Intent string `json:"intent"`
+	Depth  Depth  `json:"depth,omitempty"`
+
+	// SearchText is the question retrieval was given. Shown to the reader when
+	// it differs from what they typed, because a rewrite they cannot see is a
+	// rewrite they cannot correct.
+	SearchText string `json:"search_text,omitempty"`
+
+	// CarriedSources is how many provisions came from earlier in the conversation.
+	CarriedSources int `json:"carried_sources,omitempty"`
+}
 
 // Event is emitted to the caller as the answer is produced.
 type Event struct {
@@ -122,6 +236,7 @@ type Event struct {
 	Text      string
 	Citations []Citation
 	Result    *Result
+	Route     *Route
 }
 
 // AnswerKind is what sort of reply this was, so the client can present the three
@@ -135,6 +250,11 @@ const (
 	// KindAbstention is a refusal: retrieval found nothing usable.
 	KindAbstention AnswerKind = "abstention"
 
+	// KindInsufficient is an answer that read the retrieved provisions and
+	// reported that they do not settle the question. Sources were found and are
+	// worth showing; the question was not answered.
+	KindInsufficient AnswerKind = "insufficient"
+
 	// KindConversation is a reply to a message that was not a legal question at
 	// all — a greeting, thanks, or a question about what Seera does. It carries
 	// no citations because it makes no claim about the law, and it must never be
@@ -144,7 +264,22 @@ const (
 
 // Result summarises a completed answer.
 type Result struct {
-	Kind      AnswerKind `json:"kind"`
+	Kind AnswerKind `json:"kind"`
+
+	// Intent and Depth record what the router decided, so a surprising answer
+	// can be traced to the decision that shaped it.
+	Intent string `json:"intent,omitempty"`
+	Depth  Depth  `json:"depth,omitempty"`
+
+	// Related are follow-up questions built from the citations this answer used.
+	// Derived from stored metadata, never written by the model.
+	Related []Suggestion `json:"related,omitempty"`
+
+	// Truncated is set when generation hit the output limit. The answer stops
+	// mid-sentence, and the client must say so rather than showing it as
+	// finished — an unfinished legal statement is worse than none.
+	Truncated bool `json:"truncated,omitempty"`
+
 	Abstained bool       `json:"abstained"`
 	Grounded  bool       `json:"grounded"`
 	Citations []Citation `json:"citations"`
@@ -158,8 +293,12 @@ type Timings struct {
 	// Condense is the follow-up rewrite, and is zero for the first question in a
 	// conversation. Reported separately because it sits in front of retrieval and
 	// is therefore charged directly to time-to-first-token.
-	Condense     int64 `json:"condense"`
-	Retrieval    int64 `json:"retrieval"`
+	Condense  int64 `json:"condense"`
+	Retrieval int64 `json:"retrieval"`
+	// Expand is the second retrieval pass, and is zero unless multi-hop is on.
+	Expand int64 `json:"expand"`
+	// CarriedN is how many sources came from earlier in the conversation.
+	CarriedN     int   `json:"carried_sources"`
 	Rerank       int64 `json:"rerank"`
 	FirstToken   int64 `json:"first_token"`
 	Total        int64 `json:"total"`
@@ -186,59 +325,43 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 		return fmt.Errorf("question is empty")
 	}
 
-	// A greeting is not a retrieval problem. Answering it from a written reply
-	// costs nothing, returns immediately, and cannot state anything about the
-	// law; sending it through retrieval produced "I could not find this in the
-	// corpus", which is true and useless.
-	if intent := Classify(q.Text); intent != IntentLegal {
-		return s.converse(ctx, intent, timings, start, emit)
-	}
-
 	q.History = TrimHistory(q.History)
 
-	// What retrieval searches for. Identical to the question unless this is a
-	// follow-up, in which case it is the standalone rewrite — "what about for a
-	// PLC?" carries none of the terms that would find the provision.
-	searchText, condenseMS := s.retrievalQuery(ctx, q)
-	timings.Condense = condenseMS
-
-	retrieveStart := time.Now()
-	candidates, err := s.retriever.Search(ctx, search.Query{
-		Text:     searchText,
-		Language: q.Language,
-		AsOf:     q.AsOf,
-		Limit:    s.cfg.Candidates,
-	})
-	if err != nil {
-		if rateLimited(err) {
-			return fmt.Errorf("retrieve: %w: %w", ErrProviderQuota, err)
-		}
-		return fmt.Errorf("retrieve: %w", err)
+	// What retrieval searches for. Identical to the question unless the router
+	// rewrote it — "what about for a PLC?" carries none of the terms that would
+	// find the provision.
+	searchText := strings.TrimSpace(q.SearchText)
+	if searchText == "" {
+		searchText = q.Text
 	}
-	timings.Retrieval = time.Since(retrieveStart).Milliseconds()
+	topN := s.cfg.topNFor(q.Depth)
+
+	// Sources the reader is already looking at, re-read from the database. The
+	// client sends identifiers; the text always comes from here.
+	carried := s.carriedSources(ctx, q.CarriedChunks)
+
+	candidates, retrievalMS, err := s.retrieve(ctx, q, searchText)
+	if err != nil {
+		return err
+	}
+	timings.Retrieval = retrievalMS
 	timings.CandidateN = len(candidates)
 
 	rerankStart := time.Now()
-	top := candidates
-	if len(candidates) > 0 {
-		// Reranked against the same text retrieval used, not the raw follow-up:
-		// scoring a pronoun against a provision is how a good candidate set gets
-		// thrown away at the last step.
-		top, err = s.reranker.Rerank(ctx, searchText, candidates, s.cfg.TopN)
-		if err != nil {
-			// A reranker outage must not take the whole answer path down with
-			// it; fused order is a worse ordering, not a wrong one. The
-			// degradation is logged and reported in the result.
-			s.log.WarnContext(ctx, "reranker failed, falling back to fusion order",
-				slog.String("reranker", s.reranker.Name()),
-				slog.Any("error", err))
-			top = candidates
-			if len(top) > s.cfg.TopN {
-				top = top[:s.cfg.TopN]
-			}
-		}
-	}
+	top := s.rerankTop(ctx, searchText, candidates, topN)
 	timings.Rerank = time.Since(rerankStart).Milliseconds()
+
+	// A second retrieval pass for what the first one missed. Off unless enabled.
+	if s.cfg.MultiHop && len(top) > 0 {
+		var expandMS int64
+		top, expandMS = s.expand(ctx, q, searchText, top, topN)
+		timings.Expand = expandMS
+	}
+
+	// Carried sources lead: they are what a follow-up is about, and putting them
+	// first means the context budget spends itself on them before anything else.
+	top = mergeSources(carried, top)
+	timings.CarriedN = len(carried)
 
 	if s.shouldAbstain(top) {
 		return s.abstain(ctx, q, timings, start, emit)
@@ -272,13 +395,21 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	defer func() { _ = stream.Close() }()
 
 	filter := NewMarkerFilter(built.Sources)
+	// Strips the model's "these sources do not answer this" signal before any of
+	// it reaches the reader, and remembers that it was there.
+	gate := newPrefixGate(InsufficientSourcesSentinel)
+
 	var (
 		answer     strings.Builder
 		firstToken time.Time
+		stop       = ai.StopComplete
 	)
 
 	for stream.Next() {
 		event := stream.Event()
+		if event.Type == ai.EventDone && event.Stop != "" {
+			stop = event.Stop
+		}
 		if event.Type != ai.EventText || event.Text == "" {
 			continue
 		}
@@ -287,7 +418,7 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 			timings.FirstToken = firstToken.Sub(start).Milliseconds()
 		}
 
-		if safe := filter.Write(event.Text); safe != "" {
+		if safe := filter.Write(gate.Write(event.Text)); safe != "" {
 			answer.WriteString(safe)
 			if err := emit(Event{Type: EventToken, Text: safe}); err != nil {
 				return err
@@ -298,6 +429,12 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 		return fmt.Errorf("generate: %w", err)
 	}
 
+	if held := filter.Write(gate.Close()); held != "" {
+		answer.WriteString(held)
+		if err := emit(Event{Type: EventToken, Text: held}); err != nil {
+			return err
+		}
+	}
 	if tail := filter.Close(); tail != "" {
 		answer.WriteString(tail)
 		if err := emit(Event{Type: EventToken, Text: tail}); err != nil {
@@ -308,14 +445,36 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	used := filter.Used()
 	grounded := len(used) > 0 || !looksSubstantive(answer.String())
 
+	// An answer that hit the output limit stops mid-sentence, and on a legal
+	// answer the half that is missing is often the condition that changes the
+	// meaning. It is reported rather than presented as complete.
+	truncated := stop == ai.StopMaxTokens
+	if stop == ai.StopBlocked {
+		s.log.WarnContext(ctx, "generation stopped by the provider",
+			slog.String("stop", string(stop)))
+	}
+
 	// Report only the citations the answer actually made. Returning all
 	// retrieved sources would let an ungrounded answer arrive wearing a full set
 	// of plausible references.
 	cited := filterCitations(citations, used)
 
 	timings.Total = time.Since(start).Milliseconds()
+	// The model said the provisions do not settle the question. That is a
+	// different outcome from an answer, and a different one again from finding
+	// nothing at all: the sources were found, read, and were not enough. Saying
+	// "Grounded" over the top of it would be the most misleading badge in the
+	// product.
+	kind := KindLegal
+	if gate.Matched() {
+		kind = KindInsufficient
+	}
+
 	result := Result{
-		Kind:      KindLegal,
+		Kind:      kind,
+		Depth:     q.Depth,
+		Truncated: truncated,
+		Related:   relatedQuestions(cited),
 		Grounded:  grounded,
 		Citations: cited,
 		Timings:   timings,
@@ -337,42 +496,6 @@ func (s *Service) shouldAbstain(top []search.Result) bool {
 		return true
 	}
 	return false
-}
-
-// converse answers a message that was not a legal question.
-//
-// It emits the same event sequence as any other answer — sources, then text,
-// then done — so the client has one code path. The sources list is empty and
-// the kind says why: nothing here rests on a provision, and the UI must not
-// dress it as though it does.
-func (s *Service) converse(
-	ctx context.Context,
-	intent Intent,
-	timings Timings,
-	start time.Time,
-	emit func(Event) error,
-) error {
-	timings.Total = time.Since(start).Milliseconds()
-
-	s.log.InfoContext(ctx, "answered conversationally",
-		slog.String("intent", string(intent)))
-
-	if err := emit(Event{Type: EventSources, Citations: []Citation{}}); err != nil {
-		return err
-	}
-	if err := emit(Event{Type: EventToken, Text: ConversationalReply(intent)}); err != nil {
-		return err
-	}
-	return emit(Event{Type: EventDone, Citations: []Citation{}, Result: &Result{
-		Kind: KindConversation,
-		// Neither flag applies: nothing was searched, and nothing was claimed.
-		// They are false so that no client reading only the booleans can present
-		// this as a grounded legal answer.
-		Abstained: false,
-		Grounded:  false,
-		Citations: []Citation{},
-		Timings:   timings,
-	}})
 }
 
 func (s *Service) abstain(ctx context.Context, q Question, timings Timings, start time.Time, emit func(Event) error) error {

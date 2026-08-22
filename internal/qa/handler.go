@@ -60,6 +60,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	emit := func(event rag.Event) error {
 		switch event.Type {
+		case rag.EventRoute:
+			if event.Route == nil {
+				return nil
+			}
+			return stream.send("route", routePayload{
+				Intent:         event.Route.Intent,
+				Depth:          event.Route.Depth,
+				SearchText:     event.Route.SearchText,
+				CarriedSources: event.Route.CarriedSources,
+			})
 		case rag.EventSources:
 			return stream.send("sources", sourcesPayload{Citations: event.Citations})
 		case rag.EventToken:
@@ -79,6 +89,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				payload.Timings = event.Result.Timings
 				payload.Model = event.Result.Model
 				payload.Reranker = event.Result.Reranker
+				payload.Truncated = event.Result.Truncated
+				payload.Intent = event.Result.Intent
+				payload.Depth = event.Result.Depth
+				payload.Related = event.Result.Related
 			}
 			if payload.Citations == nil {
 				payload.Citations = []rag.Citation{}

@@ -29,22 +29,36 @@ type stubLLM struct {
 	chunks []string
 	err    error
 	got    ai.Request
+	// stop is what the provider says about why generation ended. Empty behaves
+	// as a normal completion.
+	stop ai.StopReason
 }
 
 func (s *stubLLM) Model() string { return "stub-model" }
+
+// Complete is unused by the answer path, which streams. It exists so the stub
+// satisfies ai.LLM.
+func (s *stubLLM) Complete(_ context.Context, req ai.Request) (string, *ai.Usage, error) {
+	s.got = req
+	if s.err != nil {
+		return "", nil, s.err
+	}
+	return strings.Join(s.chunks, ""), nil, nil
+}
 
 func (s *stubLLM) Stream(_ context.Context, req ai.Request) (ai.Stream, error) {
 	s.got = req
 	if s.err != nil {
 		return nil, s.err
 	}
-	return &stubStream{chunks: s.chunks}, nil
+	return &stubStream{chunks: s.chunks, stop: s.stop}, nil
 }
 
 type stubStream struct {
 	chunks []string
 	i      int
 	cur    ai.Event
+	stop   ai.StopReason
 }
 
 func (s *stubStream) Next() bool {
@@ -55,7 +69,7 @@ func (s *stubStream) Next() bool {
 	}
 	if s.i == len(s.chunks) {
 		s.i++
-		s.cur = ai.Event{Type: ai.EventDone}
+		s.cur = ai.Event{Type: ai.EventDone, Stop: s.stop}
 		return true
 	}
 	return false
@@ -89,7 +103,11 @@ func testResults(n int) []search.Result {
 }
 
 func newTestService(r Retriever, llm ai.LLM, rr Reranker, cfg Config) *Service {
-	return NewService(r, rr, llm, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewService(r, rr, llm, cfg, testLogger())
+}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func collect(t *testing.T, s *Service, q Question) ([]Event, error) {
@@ -314,5 +332,73 @@ func TestAnswerRejectsAnEmptyQuestion(t *testing.T) {
 
 	if _, err := collect(t, svc, Question{Text: "   "}); err == nil {
 		t.Error("Answer() accepted an empty question")
+	}
+}
+
+// An answer that ran out of output budget stops mid-sentence. Presenting that
+// as a finished answer is the failure this reports: the half that is missing is
+// often the condition that changes what the provision means.
+func TestAnswerReportsTruncation(t *testing.T) {
+	tests := []struct {
+		name string
+		stop ai.StopReason
+		want bool
+	}{
+		{"finished normally", ai.StopComplete, false},
+		{"provider said nothing", "", false},
+		{"hit the output limit", ai.StopMaxTokens, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(
+				&stubRetriever{results: testResults(2)},
+				&stubLLM{
+					chunks: []string{"Registration is required when applying for principal"},
+					stop:   tt.stop,
+				},
+				PassthroughReranker{}, DefaultConfig())
+
+			events, err := collect(t, svc, Question{Text: "registration?"})
+			if err != nil {
+				t.Fatalf("Answer: %v", err)
+			}
+
+			if got := events[len(events)-1].Result.Truncated; got != tt.want {
+				t.Errorf("truncated = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A truncated answer is still delivered — the text that did arrive is useful,
+// and the reader is told it is incomplete rather than shown nothing.
+func TestTruncatedAnswerIsStillDelivered(t *testing.T) {
+	svc := newTestService(
+		&stubRetriever{results: testResults(2)},
+		&stubLLM{chunks: []string{"A company must register [S1]. The deadline is"}, stop: ai.StopMaxTokens},
+		PassthroughReranker{}, DefaultConfig())
+
+	events, err := collect(t, svc, Question{Text: "registration?"})
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	var answer strings.Builder
+	for _, e := range events {
+		if e.Type == EventToken {
+			answer.WriteString(e.Text)
+		}
+	}
+	if !strings.Contains(answer.String(), "must register") {
+		t.Errorf("the partial answer was lost: %q", answer.String())
+	}
+
+	done := events[len(events)-1].Result
+	if !done.Truncated {
+		t.Error("truncation not reported")
+	}
+	if len(done.Citations) == 0 {
+		t.Error("citations from the delivered part were dropped")
 	}
 }

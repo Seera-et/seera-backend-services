@@ -50,7 +50,19 @@ type Request struct {
 	// History is the conversation this question continues, oldest first. Empty
 	// for the first question in a thread.
 	History []HistoryTurn `json:"history,omitempty"`
+
+	// ContextChunks are the chunk ids of citations the client is displaying, so
+	// a follow-up can be about provisions already on screen rather than having
+	// to find them again.
+	//
+	// Identifiers only. The text is read from the database: what a client sends
+	// can direct an answer, never supply its evidence.
+	ContextChunks []string `json:"context_chunks,omitempty"`
 }
+
+// maxContextChunks bounds how much of a conversation's citation history one
+// request may drag in. The service trims again; this rejects the abusive case.
+const maxContextChunks = 24
 
 // Validate checks the request and converts it into a domain question.
 func (r Request) Validate() (rag.Question, error) {
@@ -86,7 +98,42 @@ func (r Request) Validate() (rag.Question, error) {
 	}
 	q.History = history
 
+	carried, err := validateContextChunks(r.ContextChunks)
+	if err != nil {
+		return rag.Question{}, err
+	}
+	q.CarriedChunks = carried
+
 	return q, nil
+}
+
+// validateContextChunks bounds and cleans the carried chunk ids.
+//
+// Only the count and the shape are checked here. Whether an id exists is
+// answered by the database when the chunks are read, and one that does not is
+// skipped rather than refused — a stale id from an old tab is not a bad request.
+func validateContextChunks(ids []string) ([]legal.ChunkID, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if len(ids) > maxContextChunks {
+		return nil, fmt.Errorf("context_chunks has more than %d entries", maxContextChunks)
+	}
+
+	out := make([]legal.ChunkID, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		if len(id) > 64 {
+			return nil, fmt.Errorf("context_chunks contains an id that is not a chunk id")
+		}
+		seen[id] = true
+		out = append(out, legal.ChunkID(id))
+	}
+	return out, nil
 }
 
 // validateHistory converts and bounds the supplied conversation.
@@ -153,11 +200,16 @@ type tokenPayload struct {
 
 // donePayload is the terminal `done` event.
 type donePayload struct {
-	// Kind is "legal", "abstention" or "conversation". The client presents the
-	// three differently — a reply to "hello" must not arrive wearing the badges
-	// of a grounded legal answer — and inferring it from the booleans below is
-	// exactly the kind of guessing that gets a UI wrong.
+	// Kind is "legal", "insufficient", "abstention" or "conversation". The client
+	// presents them differently — a reply to "hello" must not arrive wearing the
+	// badges of a grounded legal answer, and neither must "these provisions do
+	// not settle it" — and inferring that from the booleans below is exactly the
+	// kind of guessing that gets a UI wrong.
 	Kind string `json:"kind"`
+
+	// Truncated is set when generation hit the output limit, so the client can
+	// say the answer is incomplete instead of showing it as finished.
+	Truncated bool `json:"truncated,omitempty"`
 
 	Citations []rag.Citation `json:"citations"`
 	Abstained bool           `json:"abstained"`
@@ -166,6 +218,23 @@ type donePayload struct {
 	Model     string         `json:"model"`
 	Reranker  string         `json:"reranker"`
 	RequestID string         `json:"request_id,omitempty"`
+
+	// Intent and Depth are the routing decision, echoed so a surprising answer
+	// can be traced to the decision that shaped it.
+	Intent string    `json:"intent,omitempty"`
+	Depth  rag.Depth `json:"depth,omitempty"`
+
+	// Related are follow-up questions built from the citations this answer used.
+	Related []rag.Suggestion `json:"related,omitempty"`
+}
+
+// routePayload is the `route` event: what the router decided, sent before
+// retrieval so the client can say what is actually happening.
+type routePayload struct {
+	Intent         string    `json:"intent"`
+	Depth          rag.Depth `json:"depth,omitempty"`
+	SearchText     string    `json:"search_text,omitempty"`
+	CarriedSources int       `json:"carried_sources,omitempty"`
 }
 
 // errorPayload is the `error` event.

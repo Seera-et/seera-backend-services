@@ -14,13 +14,16 @@ import (
 	"time"
 
 	"github.com/Seera-et/seera-backend-services/internal/ai"
+	"github.com/Seera-et/seera-backend-services/internal/chat"
 	"github.com/Seera-et/seera-backend-services/internal/citations"
 	"github.com/Seera-et/seera-backend-services/internal/config"
 	"github.com/Seera-et/seera-backend-services/internal/database"
+	"github.com/Seera-et/seera-backend-services/internal/dialogue"
 	"github.com/Seera-et/seera-backend-services/internal/documents"
 	"github.com/Seera-et/seera-backend-services/internal/ingestion"
 	"github.com/Seera-et/seera-backend-services/internal/qa"
 	"github.com/Seera-et/seera-backend-services/internal/rag"
+	"github.com/Seera-et/seera-backend-services/internal/router"
 	"github.com/Seera-et/seera-backend-services/internal/search"
 	"github.com/Seera-et/seera-backend-services/internal/server"
 	"github.com/Seera-et/seera-backend-services/pkg/logger"
@@ -155,14 +158,32 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 		}
 
 		reranker, ragCfg := buildReranker(cfg, log)
+		ragCfg.MultiHop = cfg.MultiHop
 
-		ragSvc := rag.NewService(searchSvc, reranker, llm, ragCfg, log)
-		handlers.QA = qa.NewHandler(ragSvc, log)
+		// The legal engine. It carries forward the sources a conversation has
+		// already cited, and can look an article up by number when the second
+		// retrieval pass asks for one.
+		legalSvc := rag.NewService(searchSvc, reranker, llm, ragCfg, log,
+			rag.WithSources(citationSvc),
+			rag.WithArticles(searchSvc))
+
+		// The branch point. Everything arrives here first: the router says what
+		// the message is, and this hands it to the engine that should answer.
+		answerSvc := dialogue.New(
+			router.New(llm, log),
+			chat.New(llm, log),
+			legalSvc,
+			log,
+			dialogue.WithPrefetch(searchSvc, ragCfg.Candidates),
+			dialogue.WithSourceLabels(citationSvc),
+		)
+		handlers.QA = qa.NewHandler(answerSvc, log)
 
 		log.Info("Q&A enabled",
 			slog.String("model", llm.Model()),
 			slog.String("reranker", reranker.Name()),
-			slog.Int("top_n", ragCfg.TopN))
+			slog.Int("top_n", ragCfg.TopN),
+			slog.Bool("multi_hop", ragCfg.MultiHop))
 	}
 
 	return handlers, nil

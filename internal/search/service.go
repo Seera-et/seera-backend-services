@@ -281,6 +281,29 @@ func ParseArticleRefs(query string) []ArticleRef {
 	return refs
 }
 
+// ByArticles looks provisions up by article number.
+//
+// The same arm the hybrid search uses when a question names an article, exposed
+// for the answer path's second retrieval pass: having read the first results,
+// the model can name the article a cross-reference points at, and that is a
+// lookup rather than a search.
+func (s *Service) ByArticles(ctx context.Context, q Query, numbers []string) ([]Result, error) {
+	refs := make([]ArticleRef, 0, len(numbers))
+	seen := make(map[string]bool, len(numbers))
+	for _, number := range numbers {
+		number = strings.TrimSpace(number)
+		if number == "" || seen[number] {
+			continue
+		}
+		seen[number] = true
+		refs = append(refs, ArticleRef{Number: number, Raw: number})
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	return s.articleLookup(ctx, q.withDefaults(), refs)
+}
+
 func (s *Service) articleLookup(ctx context.Context, q Query, refs []ArticleRef) ([]Result, error) {
 	numbers := make([]string, len(refs))
 	for i, r := range refs {

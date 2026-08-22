@@ -17,6 +17,7 @@ import (
 type Store interface {
 	Get(ctx context.Context, id legal.ChunkID) (Citation, error)
 	Resolve(ctx context.Context, ids []legal.ChunkID) ([]Citation, error)
+	ResolveSome(ctx context.Context, ids []legal.ChunkID) ([]Citation, error)
 }
 
 // Service resolves citations and serves them.
@@ -32,6 +33,13 @@ func NewService(store Store, log *slog.Logger) *Service {
 // Resolve implements Resolver.
 func (s *Service) Resolve(ctx context.Context, ids []legal.ChunkID) ([]Citation, error) {
 	return s.store.Resolve(ctx, ids)
+}
+
+// ResolveSome returns the citations that exist and skips the rest. Used when an
+// answer carries forward the sources a conversation already cited, where a stale
+// identifier should cost one source rather than the answer.
+func (s *Service) ResolveSome(ctx context.Context, ids []legal.ChunkID) ([]Citation, error) {
+	return s.store.ResolveSome(ctx, ids)
 }
 
 // Handler serves GET /api/v1/citations/{id}.

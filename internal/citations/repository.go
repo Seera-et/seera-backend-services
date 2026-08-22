@@ -83,6 +83,59 @@ func (r *Repository) Resolve(ctx context.Context, ids []legal.ChunkID) ([]Citati
 	return out, nil
 }
 
+// ResolveSome returns the citations that exist, in the order requested, and
+// silently skips the ones that do not.
+//
+// Deliberately lenient, unlike Resolve. This serves a different purpose: an
+// answer carrying forward the sources a conversation already cited. A chunk id
+// from a browser tab open across a re-ingestion should cost that one source, not
+// the whole answer. Resolve stays strict, because there an unresolvable id is a
+// grounding failure in something already delivered.
+func (r *Repository) ResolveSome(ctx context.Context, ids []legal.ChunkID) ([]Citation, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	keys := make([]string, len(ids))
+	for i, id := range ids {
+		keys[i] = string(id)
+	}
+
+	query := `
+		SELECT` + citationColumns + `
+		FROM chunks c
+		JOIN articles a          ON a.id = c.article_id
+		JOIN document_versions v ON v.id = c.version_id
+		JOIN legal_documents d   ON d.id = c.document_id
+		WHERE c.id = ANY($1)`
+
+	rows, err := r.pool.Query(ctx, query, keys)
+	if err != nil {
+		return nil, fmt.Errorf("resolve citations: %w", err)
+	}
+	defer rows.Close()
+
+	found := make(map[legal.ChunkID]Citation, len(ids))
+	for rows.Next() {
+		c, err := scanCitation(rows)
+		if err != nil {
+			return nil, err
+		}
+		found[c.ChunkID] = c
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("resolve citations: %w", err)
+	}
+
+	out := make([]Citation, 0, len(found))
+	for _, id := range ids {
+		if c, ok := found[id]; ok {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 // Get resolves a single citation.
 func (r *Repository) Get(ctx context.Context, id legal.ChunkID) (Citation, error) {
 	query := `

@@ -20,7 +20,11 @@ Rules:
 
 1. Use only the numbered sources below. Do not use anything you know about
    Ethiopian law or any other law from outside them. If the sources do not
-   contain the answer, say so plainly and stop.
+   contain the answer, say so plainly and stop. Start that reply with
+   NOT_IN_SOURCES on the first line, alone, before your explanation — it tells
+   the system not to present the answer as though the law had been found. Use it
+   whenever the honest answer is "these provisions do not settle this", even if
+   they touch the subject and you can say something about them.
 2. Cite every legal statement with the marker of the source it comes from, like
    [S1] or [S2, S3]. Put the marker immediately after the statement it supports.
    A sentence that states what the law says and carries no marker is an error.

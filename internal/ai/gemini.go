@@ -173,11 +173,104 @@ type geminiContent struct {
 }
 
 type geminiGenerateRequest struct {
-	Contents          []geminiContent `json:"contents"`
-	SystemInstruction *geminiContent  `json:"systemInstruction,omitempty"`
-	GenerationConfig  struct {
-		MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
-	} `json:"generationConfig"`
+	Contents          []geminiContent        `json:"contents"`
+	SystemInstruction *geminiContent         `json:"systemInstruction,omitempty"`
+	GenerationConfig  geminiGenerationConfig `json:"generationConfig"`
+}
+
+type geminiGenerationConfig struct {
+	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
+
+	// ResponseMIMEType and ResponseSchema are Gemini's structured-output
+	// controls. Set together: the schema is ignored unless the MIME type asks
+	// for JSON.
+	ResponseMIMEType string  `json:"responseMimeType,omitempty"`
+	ResponseSchema   *Schema `json:"responseSchema,omitempty"`
+}
+
+// buildRequest is shared by Stream and Complete, so the two cannot drift in how
+// they translate a Request.
+func buildRequest(req Request) (geminiGenerateRequest, error) {
+	body := geminiGenerateRequest{}
+	body.GenerationConfig.MaxOutputTokens = req.MaxTokens
+
+	if req.JSONSchema != nil {
+		body.GenerationConfig.ResponseMIMEType = "application/json"
+		body.GenerationConfig.ResponseSchema = req.JSONSchema
+	}
+
+	if req.System != "" {
+		body.SystemInstruction = &geminiContent{Parts: []geminiPart{{Text: req.System}}}
+	}
+	for _, m := range req.Messages {
+		role := "user"
+		if m.Role == RoleAssistant {
+			role = "model"
+		}
+		body.Contents = append(body.Contents, geminiContent{
+			Role:  role,
+			Parts: []geminiPart{{Text: m.Content}},
+		})
+	}
+	if len(body.Contents) == 0 {
+		return geminiGenerateRequest{}, errors.New("gemini: request has no messages")
+	}
+	return body, nil
+}
+
+// geminiResponse is the non-streaming shape.
+type geminiResponse struct {
+	Candidates []struct {
+		Content      geminiContent `json:"content"`
+		FinishReason string        `json:"finishReason"`
+	} `json:"candidates"`
+	UsageMetadata struct {
+		PromptTokenCount     int `json:"promptTokenCount"`
+		CandidatesTokenCount int `json:"candidatesTokenCount"`
+	} `json:"usageMetadata"`
+	PromptFeedback *struct {
+		BlockReason string `json:"blockReason"`
+	} `json:"promptFeedback"`
+}
+
+// Complete returns the whole response in one call.
+//
+// Used where the output is read by code before anything reaches the user: a
+// routing decision, or a reply that has to pass a check before it is shown.
+func (g *GeminiLLM) Complete(ctx context.Context, req Request) (string, *Usage, error) {
+	body, err := buildRequest(req)
+	if err != nil {
+		return "", nil, err
+	}
+
+	resp, err := g.client.post(ctx, g.client.url("generateContent", nil), body)
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var decoded geminiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return "", nil, fmt.Errorf("gemini: decode response: %w", err)
+	}
+
+	if decoded.PromptFeedback != nil && decoded.PromptFeedback.BlockReason != "" {
+		return "", nil, fmt.Errorf("gemini: prompt blocked (%s)", decoded.PromptFeedback.BlockReason)
+	}
+	if len(decoded.Candidates) == 0 {
+		return "", nil, errors.New("gemini: response has no candidates")
+	}
+
+	var text strings.Builder
+	for _, part := range decoded.Candidates[0].Content.Parts {
+		text.WriteString(part.Text)
+	}
+
+	usage := &Usage{
+		InputTokens:  decoded.UsageMetadata.PromptTokenCount,
+		OutputTokens: decoded.UsageMetadata.CandidatesTokenCount,
+	}
+	return text.String(), usage, nil
 }
 
 type geminiStreamChunk struct {
@@ -196,24 +289,9 @@ type geminiStreamChunk struct {
 
 // Stream generates an answer, streaming text as it arrives.
 func (g *GeminiLLM) Stream(ctx context.Context, req Request) (Stream, error) {
-	body := geminiGenerateRequest{}
-	body.GenerationConfig.MaxOutputTokens = req.MaxTokens
-
-	if req.System != "" {
-		body.SystemInstruction = &geminiContent{Parts: []geminiPart{{Text: req.System}}}
-	}
-	for _, m := range req.Messages {
-		role := "user"
-		if m.Role == RoleAssistant {
-			role = "model"
-		}
-		body.Contents = append(body.Contents, geminiContent{
-			Role:  role,
-			Parts: []geminiPart{{Text: m.Content}},
-		})
-	}
-	if len(body.Contents) == 0 {
-		return nil, errors.New("gemini: request has no messages")
+	body, err := buildRequest(req)
+	if err != nil {
+		return nil, err
 	}
 
 	// alt=sse asks for Server-Sent Events; without it the endpoint returns a
@@ -235,6 +313,7 @@ type geminiStream struct {
 	current Event
 	err     error
 	usage   *Usage
+	stop    StopReason
 	done    bool
 }
 
@@ -267,6 +346,12 @@ func (s *geminiStream) Next() bool {
 			return false
 		}
 
+		for _, candidate := range chunk.Candidates {
+			if candidate.FinishReason != "" {
+				s.stop = ParseStopReason(candidate.FinishReason)
+			}
+		}
+
 		if chunk.UsageMetadata.CandidatesTokenCount > 0 {
 			s.usage = &Usage{
 				InputTokens:  chunk.UsageMetadata.PromptTokenCount,
@@ -294,7 +379,7 @@ func (s *geminiStream) Next() bool {
 	}
 
 	s.done = true
-	s.current = Event{Type: EventDone, Usage: s.usage}
+	s.current = Event{Type: EventDone, Usage: s.usage, Stop: s.stop}
 	return true
 }
 

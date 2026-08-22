@@ -78,7 +78,7 @@ distinguishable from a stuck one.
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | Liveness plus a real database check |
-| `POST /api/v1/qa/query` | Ask a legal question; streams Server-Sent Events |
+| `POST /api/v1/qa/query` | Ask anything; routed, then streamed as Server-Sent Events |
 | `GET /api/v1/citations/{id}` | Resolve a citation to its exact source text |
 | `GET /api/v1/corpus/stats` | What the corpus contains, over published versions |
 | `GET /api/v1/documents` | Browse the catalogue (`q`, `language`, `type`, `limit`, `offset`) |
@@ -86,9 +86,10 @@ distinguishable from a stuck one.
 | `GET /api/v1/documents/{id}/articles` | A version's articles, keyset-paginated (`version`, `after`, `limit`) |
 | `POST /api/v1/admin/documents/ingest` | Ingest an extraction (bearer token) |
 
-The answer stream is ordered `sources` → `token`* → `done`, with `error` in place
-of `done` on failure. `sources` arrives before the first token so the UI can
-render citation cards while the answer streams.
+The answer stream is ordered `route` → `sources` → `token`* → `done`, with
+`error` in place of `done` on failure. `route` says which engine is answering and
+what retrieval was actually given; `sources` arrives before the first token so the
+UI can render citation cards while the answer streams.
 
 The catalogue endpoints read **published versions only** — the same set retrieval
 sees, so a document that can be browsed is a document that can be cited, and the
@@ -113,38 +114,115 @@ Nothing is stored server-side. The client owns the conversation and sends what i
 wants considered, which keeps the "no answer text is persisted" property intact
 and sidesteps owning a conversation with no authentication in place.
 
-When `history` is present the service rewrites the question into a standalone
-form before retrieval — "what about for a PLC?" carries none of the terms that
-would find the provision. The rewrite is bounded (one sentence, 5s, capped
-tokens) and every failure path degrades to the previous question joined to the
-current one rather than failing the answer. Its cost shows up as `condense` in
-the `timings_ms` of the `done` event.
+The rewrite that makes a follow-up searchable is done by the router (below),
+which returns it in the same call that classifies the message. Its cost shows up
+as `condense` in the `timings_ms` of the `done` event.
 
 Earlier turns also reach the generator, labelled as context and not as a source.
 They cannot become grounding: marker validation still runs against the chunks
 retrieved for this request.
 
-### Messages that are not legal questions
+### Routing
 
-"Hello" is not a retrieval problem. An intent gate in front of retrieval
-(`internal/rag/smalltalk.go`) recognises greetings, thanks, farewells and
-questions about what Seera does, and answers them from written replies — no
-retrieval, no model call, no latency.
+Every message goes through a router before anything is retrieved
+(`internal/router`). One structured model call returns the intent, the depth, and
+the question rewritten to stand on its own — classification and the follow-up
+rewrite together, because two serial calls in front of retrieval would spend the
+time-to-first-token budget on plumbing.
 
-The classifier is deliberately lopsided. Greetings match the whole message, so
-"hi, what does Article 5 say?" is a legal question; capability phrases match only
-inside short messages; everything unrecognised is legal. Sending a greeting to
-retrieval produces an awkward "not found". Sending a legal question to a canned
-reply produces a statement about Ethiopian law that no source supports, and that
-is the one thing this system must not do.
+```
+                 internal/router          classify + rewrite, one call
+                        │
+        ┌───────────────┼────────────────────────┐
+        ▼               ▼                        ▼
+ internal/chat    internal/rag             internal/rag
+ general reply    legal answer             discussion: carried sources
+        │               │                        │
+        └───────────────┴────────────────────────┘
+                 internal/dialogue  ← dispatch, fall-through, route event
+```
 
-The `done` event carries `kind`: `legal`, `abstention` or `conversation`. The
-client presents the three differently, and a conversational reply arrives with no
-citations and neither `grounded` nor `abstained` set, so no client reading only
-the booleans can dress it as a grounded legal answer.
+Three intents:
 
-Every JSON error is `{"error":{"code","message","request_id"}}`. Clients switch on
-`code`; internal causes are logged against the request ID, never serialised.
+| Intent | Engine | |
+|---|---|---|
+| `legal` | `internal/rag` | Retrieve, rerank, generate, validate every citation |
+| `discussion` | `internal/rag` | The same, carrying the provisions already cited in the thread |
+| `general` | `internal/chat` | Greetings, what Seera does, and general concepts — no corpus, no citations |
+
+**Safety does not rest on the classifier being right.** The general engine is
+given no sources and a prompt that forbids asserting Ethiopian law, and every
+reply it produces is checked before anyone sees it (`internal/chat/guard.go`). A
+reply that names an article, an instrument, or an obligation under Ethiopian law
+is discarded and the message is answered from the corpus instead. A misroute
+therefore costs latency, not correctness.
+
+Failures route to the law: a router timeout, a malformed decision or a provider
+outage all resolve to `legal`, which is the expensive path and the safe one.
+
+On the first turn of a conversation, retrieval starts in parallel with the router
+and is used only if the router agrees the message is legal and did not change the
+query. That hides the router's latency on the turn where the question is already
+the search query.
+
+### Conversation memory
+
+`context_chunks` carries the chunk ids of the citations the client is displaying.
+The server re-reads them from the database (`citations.ResolveSome`, lenient about
+ids that no longer exist) and puts them at the front of the context, so "explain
+the second one" is answered from the provision already on screen rather than from
+whatever retrieval finds for a pronoun. Identifiers only — text from a client can
+direct an answer, never supply its evidence.
+
+### When an answer is less than it looks
+
+Two failures used to reach the reader wearing a "Grounded" badge.
+
+**The provisions did not settle it.** "The sources do not contain the
+requirements for a business licence" is a well-cited, perfectly grounded
+sentence, and nothing in the citation machinery can tell it apart from an
+answer. So the generation contract asks for a sentinel — the reply begins with
+`NOT_IN_SOURCES` — which the server strips before any of it streams and reports
+as `kind: "insufficient"`. Sources are still returned: they were read, and they
+are worth reading.
+
+**The answer was cut off.** The provider's `finishReason` was parsed and
+discarded, so an answer that hit the output limit and stopped mid-sentence
+looked finished. It now sets `truncated` on the `done` event. The output budget
+also rose from 2048 to 4096 tokens, because the prompt now asks for the
+provision *and* an explanation of it, and Amharic costs about a token per
+character.
+
+### Answer depth and the second pass
+
+The router also picks a depth: `quote` (fewer provisions, the text itself),
+`explain` (the default), `analyse` (more provisions, applied together). It scales
+how many reach the generator, inside the same context budget.
+
+`ANSWER_MULTI_HOP=true` enables a second retrieval pass: after the first results
+come back, the model is asked which further articles they cross-reference, and
+those are fetched too. Off by default — it costs a model call and a retrieval on
+every answer that uses it, and that is charged to time-to-first-token. Turn it on
+when the evaluation says the trade is worth it.
+
+### Evaluation
+
+```bash
+set -a && source .env && set +a
+go test -tags eval ./tests/evaluation/... -v
+```
+
+`tests/evaluation/dataset/routing_v1.yaml` holds ~50 labelled messages: greetings
+in both languages, capability questions, plain legal questions, greetings with a
+question attached, follow-ups that need the rewrite, questions about sources
+already on screen, and attempts to talk the router out of its job.
+
+Two numbers come out, and they are not equally important. Exact intent accuracy
+is informational — confusing `legal` with `discussion` costs nothing, since both
+retrieve. **Questions needing the corpus that were routed to the general engine
+must be zero**, and that assertion fails the build. The dataset's shape is checked
+by the ordinary test run, so a malformed one does not wait for a tagged run to be
+noticed.
 
 ## Layout
 

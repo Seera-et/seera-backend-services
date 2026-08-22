@@ -46,6 +46,16 @@ type Config struct {
 	AnthropicAPIKey Secret
 	CohereAPIKey    Secret
 
+	// MultiHop enables the answer path's second retrieval pass: after the first
+	// results come back, the model is asked what is still missing and that is
+	// retrieved too.
+	//
+	// Off by default. It buys recall on questions that span several provisions,
+	// and costs a model call plus a retrieval on the answers that use it — which
+	// is charged directly to time-to-first-token. Turn it on when the evaluation
+	// says the trade is worth it, not before.
+	MultiHop bool
+
 	// GeminiModel overrides the generation model. Empty uses the package
 	// default, which favours latency because time-to-first-token is a product
 	// requirement.
@@ -99,6 +109,7 @@ func Load() (Config, error) {
 		DatabaseURL:     Secret(os.Getenv("DATABASE_URL")),
 		GeminiAPIKey:    Secret(os.Getenv("GEMINI_API_KEY")),
 		GeminiModel:     envString("GEMINI_MODEL", ""),
+		MultiHop:        envBool("ANSWER_MULTI_HOP", false),
 		OpenAIAPIKey:    Secret(os.Getenv("OPENAI_API_KEY")),
 		AnthropicAPIKey: Secret(os.Getenv("ANTHROPIC_API_KEY")),
 		CohereAPIKey:    Secret(os.Getenv("COHERE_API_KEY")),
@@ -244,6 +255,19 @@ func firstRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// envBool reads a boolean flag. Anything other than a recognised true value is
+// false, because a misspelt flag should leave a feature off rather than on.
+func envBool(key string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "":
+		return def
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func envString(key, def string) string {

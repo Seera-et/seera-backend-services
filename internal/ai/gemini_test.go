@@ -238,3 +238,168 @@ func TestGeminiErrorsDoNotLeakTheAPIKey(t *testing.T) {
 
 var _ Embedder = (*GeminiEmbedder)(nil)
 var _ LLM = (*GeminiLLM)(nil)
+
+// Complete is the path the router and the general engine take. It is not a
+// variant of Stream: a different endpoint, a different response shape, and the
+// only one that can ask for structured output.
+func TestGeminiCompleteReturnsTheWholeResponse(t *testing.T) {
+	var got geminiGenerateRequest
+	var gotPath string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		_, _ = io.WriteString(w, `{
+			"candidates": [{"content": {"parts": [{"text": "{\"intent\":\"legal\"}"}]}}],
+			"usageMetadata": {"promptTokenCount": 120, "candidatesTokenCount": 8}
+		}`)
+	}))
+	defer server.Close()
+
+	llm, err := NewGeminiLLM("test-key", WithGeminiBaseURL(server.URL))
+	if err != nil {
+		t.Fatalf("NewGeminiLLM: %v", err)
+	}
+
+	text, usage, err := llm.Complete(context.Background(), Request{
+		System:    "route this",
+		Messages:  []Message{{Role: RoleUser, Content: "How do I register a company?"}},
+		MaxTokens: 200,
+		JSONSchema: &Schema{
+			Type:       "object",
+			Properties: map[string]*Schema{"intent": {Type: "string", Enum: []string{"legal"}}},
+			Required:   []string{"intent"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	if text != `{"intent":"legal"}` {
+		t.Errorf("text = %q", text)
+	}
+	if usage == nil || usage.InputTokens != 120 || usage.OutputTokens != 8 {
+		t.Errorf("usage = %+v, want the reported counts", usage)
+	}
+	if !strings.HasSuffix(gotPath, ":generateContent") {
+		t.Errorf("called %q, want the non-streaming endpoint", gotPath)
+	}
+
+	// Asking for a shape is what makes the response parseable by code rather
+	// than by hope.
+	if got.GenerationConfig.ResponseMIMEType != "application/json" {
+		t.Errorf("responseMimeType = %q, want application/json",
+			got.GenerationConfig.ResponseMIMEType)
+	}
+	if got.GenerationConfig.ResponseSchema == nil {
+		t.Error("the schema was not sent")
+	}
+	if got.SystemInstruction == nil {
+		t.Error("the system prompt was not sent")
+	}
+}
+
+func TestGeminiCompleteWithoutASchemaAsksForNoMIMEType(t *testing.T) {
+	var got geminiGenerateRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"Hello."}]}}]}`)
+	}))
+	defer server.Close()
+
+	llm, _ := NewGeminiLLM("test-key", WithGeminiBaseURL(server.URL))
+	text, _, err := llm.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if text != "Hello." {
+		t.Errorf("text = %q", text)
+	}
+	if got.GenerationConfig.ResponseMIMEType != "" {
+		t.Errorf("responseMimeType = %q, want it unset for a free-text call",
+			got.GenerationConfig.ResponseMIMEType)
+	}
+}
+
+func TestGeminiCompleteSurfacesABlockedPrompt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"promptFeedback":{"blockReason":"SAFETY"}}`)
+	}))
+	defer server.Close()
+
+	llm, _ := NewGeminiLLM("test-key", WithGeminiBaseURL(server.URL))
+	_, _, err := llm.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "x"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "SAFETY") {
+		t.Errorf("err = %v, want the block reason", err)
+	}
+}
+
+func TestGeminiCompleteRejectsAnEmptyRequest(t *testing.T) {
+	llm, _ := NewGeminiLLM("test-key")
+	if _, _, err := llm.Complete(context.Background(), Request{}); err == nil {
+		t.Error("a request with no messages was accepted")
+	}
+}
+
+// The provider's finish reason is the only signal that an answer stopped early
+// rather than finished. It was parsed and discarded before this existed.
+func TestParseStopReason(t *testing.T) {
+	tests := map[string]StopReason{
+		"":              StopComplete,
+		"STOP":          StopComplete,
+		"stop":          StopComplete,
+		"MAX_TOKENS":    StopMaxTokens,
+		" max_tokens ":  StopMaxTokens,
+		"LENGTH":        StopMaxTokens,
+		"SAFETY":        StopBlocked,
+		"RECITATION":    StopBlocked,
+		"SOMETHING_NEW": StopOther,
+	}
+
+	for raw, want := range tests {
+		if got := ParseStopReason(raw); got != want {
+			t.Errorf("ParseStopReason(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestGeminiStreamCarriesTheFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"A partial answer\"}]}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"MAX_TOKENS\"}]}\n\n")
+	}))
+	defer server.Close()
+
+	llm, _ := NewGeminiLLM("test-key", WithGeminiBaseURL(server.URL))
+	stream, err := llm.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "x"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer func() { _ = stream.Close() }()
+
+	var last Event
+	for stream.Next() {
+		last = stream.Event()
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream error: %v", err)
+	}
+
+	if last.Type != EventDone {
+		t.Fatalf("last event is %q, want done", last.Type)
+	}
+	if last.Stop != StopMaxTokens {
+		t.Errorf("stop = %q, want %q — an answer cut off at the limit must be "+
+			"distinguishable from one that finished", last.Stop, StopMaxTokens)
+	}
+}
