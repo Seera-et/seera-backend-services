@@ -26,6 +26,7 @@ import (
 	"github.com/Seera-et/seera-backend-services/internal/router"
 	"github.com/Seera-et/seera-backend-services/internal/search"
 	"github.com/Seera-et/seera-backend-services/internal/server"
+	"github.com/Seera-et/seera-backend-services/internal/tracing"
 	"github.com/Seera-et/seera-backend-services/pkg/logger"
 )
 
@@ -127,6 +128,13 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 	citationSvc := citations.NewService(citations.NewRepository(db.Pool), log)
 	handlers.Citation = citationSvc.Handler()
 
+	// Traces record what a request decided (see internal/dialogue.Tracer) and
+	// read back by request id. Needs only a database, same as citations — the
+	// read endpoint is registered even if Q&A itself ends up disabled below;
+	// it just never has anything to return in that case.
+	tracer := tracing.NewRepository(db.Pool, log)
+	handlers.Traces = tracer.Handler(log)
+
 	// The catalogue is the same: reads over published versions, no provider
 	// involved, so browsing works on a database with a corpus and no API keys.
 	documentsHandler := documents.NewHandler(
@@ -143,11 +151,6 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 	case cfg.GeminiAPIKey.Empty():
 		log.Warn("Q&A disabled: GEMINI_API_KEY is not set")
 	default:
-		searchSvc, err := search.NewService(db.Pool, embedder)
-		if err != nil {
-			return server.Handlers{}, err
-		}
-
 		llmOpts := []ai.GeminiOption{}
 		if cfg.GeminiModel != "" {
 			llmOpts = append(llmOpts, ai.WithGeminiModel(cfg.GeminiModel))
@@ -161,25 +164,51 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 			return server.Handlers{}, err
 		}
 
-		reranker, ragCfg := buildReranker(cfg, log)
+		// WithTranslation needs llm, so search.NewService is built after it —
+		// the only reason the two swapped order from before this existed.
+		searchSvc, err := search.NewService(db.Pool, embedder, search.WithTranslation(llm, log))
+		if err != nil {
+			return server.Handlers{}, err
+		}
+
+		reranker, ragCfg := buildReranker(cfg, log, llm)
 		ragCfg.MultiHop = cfg.MultiHop
+		ragCfg.CitationEntailment = cfg.CitationEntailment
+
+		legalOpts := []rag.Option{
+			rag.WithSources(citationSvc),
+			rag.WithArticles(searchSvc),
+		}
+		if cfg.CitationEntailment {
+			// Experimental (see config.Config.CitationEntailment). The
+			// verifier is only ever consulted when the flag is also set —
+			// see rag.Service.Answer — so building it unconditionally here
+			// would be dead weight, not a safety net.
+			legalOpts = append(legalOpts, rag.WithVerifier(rag.NewLLMVerifier(llm)))
+			log.Info("citation entailment enabled (experimental, adds a call after each answer)")
+		}
 
 		// The legal engine. It carries forward the sources a conversation has
 		// already cited, and can look an article up by number when the second
 		// retrieval pass asks for one.
-		legalSvc := rag.NewService(searchSvc, reranker, llm, ragCfg, log,
-			rag.WithSources(citationSvc),
-			rag.WithArticles(searchSvc))
+		legalSvc := rag.NewService(searchSvc, reranker, llm, ragCfg, log, legalOpts...)
+
+		// Cached in front of the engine, not inside it: a repeated or refreshed
+		// question skips rerank and generation when retrieval confirms nothing
+		// relevant has changed. See rag.Cache's doc comment for why this is safe
+		// to leave always on rather than gated behind a flag.
+		cachedLegal := rag.NewCache(legalSvc, searchSvc, ragCfg.Candidates, rag.DefaultCacheConfig(), log)
 
 		// The branch point. Everything arrives here first: the router says what
 		// the message is, and this hands it to the engine that should answer.
 		answerSvc := dialogue.New(
 			router.New(llm, log),
 			chat.New(llm, log),
-			legalSvc,
+			cachedLegal,
 			log,
 			dialogue.WithPrefetch(searchSvc, ragCfg.Candidates),
 			dialogue.WithSourceLabels(citationSvc),
+			dialogue.WithTracer(tracer),
 		)
 		handlers.QA = qa.NewHandler(answerSvc, log)
 
@@ -236,22 +265,35 @@ func buildLLM(cfg config.Config, log *slog.Logger, primary ai.LLM) (ai.LLM, erro
 // buildReranker picks the reranker and the abstention threshold that goes with it.
 //
 // The threshold is not portable between rerankers: Cohere returns a calibrated
-// relevance score, while the passthrough returns an RRF value on an unrelated
-// scale. Setting a score threshold without a real reranker would abstain on
-// everything, so the two are chosen together.
-func buildReranker(cfg config.Config, log *slog.Logger) (rag.Reranker, rag.Config) {
+// relevance score, the LLM reranker returns its own 0-1 judgment on a
+// different (unvalidated) scale, and the passthrough returns an RRF value on
+// an unrelated scale entirely. Setting a score threshold without a real
+// reranker would abstain on everything, so a reranker and its threshold are
+// always chosen together.
+//
+// llm is the already-built generation client (Gemini, or the OpenRouter
+// fallback) — passed in rather than constructed here so this function has no
+// credential of its own to fail on for the LLM reranker path.
+func buildReranker(cfg config.Config, log *slog.Logger, llm ai.LLM) (rag.Reranker, rag.Config) {
 	ragCfg := rag.DefaultConfig()
 
 	if cfg.CohereAPIKey.Empty() {
-		log.Warn("no reranker configured: passing fused retrieval order straight to the model. " +
-			"Set COHERE_API_KEY to enable reranking; measure the difference before trusting either.")
-		return rag.PassthroughReranker{}, ragCfg
+		// Not PassthroughReranker: without a calibrated score, shouldAbstain's
+		// only signal is "zero candidates" — a single, barely-relevant result
+		// always passes. The LLM reranker costs no new credential (the model
+		// already answering questions scores its own retrieval candidates) and
+		// gives abstention a real number to compare against.
+		log.Info("no COHERE_API_KEY: reranking with the LLM instead of a cross-encoder. " +
+			"Slower and unvalidated — set COHERE_API_KEY for a purpose-built, calibrated reranker.")
+		ragCfg.MinRerankScore = rag.LLMRerankMinScore
+		return rag.NewLLMReranker(llm), ragCfg
 	}
 
 	reranker, err := rag.NewCohereReranker(cfg.CohereAPIKey.Value())
 	if err != nil {
-		log.Warn("reranker unavailable, falling back to fusion order", slog.Any("error", err))
-		return rag.PassthroughReranker{}, ragCfg
+		log.Warn("Cohere reranker unavailable, using the LLM reranker instead", slog.Any("error", err))
+		ragCfg.MinRerankScore = rag.LLMRerankMinScore
+		return rag.NewLLMReranker(llm), ragCfg
 	}
 
 	// Only meaningful with a calibrated scorer. Below this, the top result is

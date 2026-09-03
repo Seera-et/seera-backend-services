@@ -70,6 +70,18 @@ type Config struct {
 	// says the trade is worth it, not before.
 	MultiHop bool
 
+	// CitationEntailment enables a post-generation check: for each citation,
+	// does the cited source's text actually support the claim it is attached
+	// to, not just "was it retrieved and in context" (which MarkerFilter
+	// already guarantees unconditionally).
+	//
+	// Off by default, same posture as MultiHop: it costs one more model call
+	// after the stream ends (so it never delays the visible answer, only the
+	// final citations/done event) and its false-positive rate is unmeasured
+	// until the eval harness says otherwise. Turn it on when that evidence
+	// says the trade is worth it, not before.
+	CitationEntailment bool
+
 	// GeminiModel overrides the generation model. Empty uses the package
 	// default, which favours latency because time-to-first-token is a product
 	// requirement.
@@ -120,14 +132,15 @@ func Load() (Config, error) {
 		Env:      envString("ENV", "dev"),
 		LogLevel: envString("LOG_LEVEL", "info"),
 
-		DatabaseURL:     Secret(os.Getenv("DATABASE_URL")),
-		GeminiAPIKey:    Secret(os.Getenv("GEMINI_API_KEY")),
-		GeminiModel:     envString("GEMINI_MODEL", ""),
-		MultiHop:        envBool("ANSWER_MULTI_HOP", false),
-		OpenAIAPIKey:    Secret(os.Getenv("OPENAI_API_KEY")),
-		AnthropicAPIKey: Secret(os.Getenv("ANTHROPIC_API_KEY")),
-		CohereAPIKey:    Secret(os.Getenv("COHERE_API_KEY")),
-		AdminToken:      Secret(os.Getenv("ADMIN_API_TOKEN")),
+		DatabaseURL:        Secret(os.Getenv("DATABASE_URL")),
+		GeminiAPIKey:       Secret(os.Getenv("GEMINI_API_KEY")),
+		GeminiModel:        envString("GEMINI_MODEL", ""),
+		MultiHop:           envBool("ANSWER_MULTI_HOP", false),
+		CitationEntailment: envBool("ANSWER_CITATION_ENTAILMENT", false),
+		OpenAIAPIKey:       Secret(os.Getenv("OPENAI_API_KEY")),
+		AnthropicAPIKey:    Secret(os.Getenv("ANTHROPIC_API_KEY")),
+		CohereAPIKey:       Secret(os.Getenv("COHERE_API_KEY")),
+		AdminToken:         Secret(os.Getenv("ADMIN_API_TOKEN")),
 
 		OpenRouterAPIKey: Secret(os.Getenv("OPENROUTER_API_KEY")),
 		OpenRouterModel:  envString("OPENROUTER_MODEL", ""),
