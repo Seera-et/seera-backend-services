@@ -94,6 +94,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				payload.Depth = event.Result.Depth
 				payload.Related = event.Result.Related
 				payload.Confidence = event.Result.Confidence
+				payload.Unverified = event.Result.Unverified
 			}
 			if payload.Citations == nil {
 				payload.Citations = []rag.Citation{}

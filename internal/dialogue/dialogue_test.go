@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/go-chi/chi/v5/middleware"
+
 	"github.com/Seera-et/seera-backend-services/internal/ai"
 	"github.com/Seera-et/seera-backend-services/internal/chat"
 	"github.com/Seera-et/seera-backend-services/internal/legal"
@@ -370,5 +372,97 @@ func TestEmptyQuestionIsRejected(t *testing.T) {
 		func(rag.Event) error { return nil })
 	if err == nil {
 		t.Error("empty question accepted")
+	}
+}
+
+type stubTracer struct {
+	calls atomic.Int32
+	got   Trace
+}
+
+func (s *stubTracer) Trace(_ context.Context, t Trace) {
+	s.calls.Add(1)
+	s.got = t
+}
+
+func tracedContext(requestID string) context.Context {
+	return context.WithValue(context.Background(), middleware.RequestIDKey, requestID)
+}
+
+func TestTracerRecordsTheLegalPathResult(t *testing.T) {
+	tracer := &stubTracer{}
+	svc := newService(t, &stubRouter{decision: router.Decision{Intent: router.IntentLegal}},
+		&stubGeneral{}, &stubLegal{}, WithTracer(tracer))
+
+	err := svc.Answer(tracedContext("req-1"), rag.Question{Text: "What does Article 45 say?"},
+		func(rag.Event) error { return nil })
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	if tracer.calls.Load() != 1 {
+		t.Fatalf("Trace called %d times, want 1", tracer.calls.Load())
+	}
+	if tracer.got.RequestID != "req-1" {
+		t.Errorf("RequestID = %q, want req-1", tracer.got.RequestID)
+	}
+	if tracer.got.RouteIntent != string(router.IntentLegal) {
+		t.Errorf("RouteIntent = %q, want %q", tracer.got.RouteIntent, router.IntentLegal)
+	}
+	if tracer.got.Result == nil || tracer.got.Result.Kind != rag.KindLegal {
+		t.Errorf("Result = %+v, want Kind %q", tracer.got.Result, rag.KindLegal)
+	}
+}
+
+func TestTracerRecordsTheGeneralPathResult(t *testing.T) {
+	tracer := &stubTracer{}
+	general := &stubGeneral{reply: chat.Reply{Text: "Hello."}}
+	svc := newService(t, &stubRouter{decision: router.Decision{Intent: router.IntentGeneral}},
+		general, &stubLegal{}, WithTracer(tracer))
+
+	err := svc.Answer(tracedContext("req-2"), rag.Question{Text: "hi"},
+		func(rag.Event) error { return nil })
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	if tracer.calls.Load() != 1 {
+		t.Fatalf("Trace called %d times, want 1", tracer.calls.Load())
+	}
+	if tracer.got.Result == nil || tracer.got.Result.Kind != rag.KindConversation {
+		t.Errorf("Result = %+v, want Kind %q", tracer.got.Result, rag.KindConversation)
+	}
+}
+
+func TestTracerIsSkippedWhenTheClientDisconnectsBeforeDone(t *testing.T) {
+	tracer := &stubTracer{}
+	legal := &stubLegal{}
+	svc := newService(t, &stubRouter{decision: router.Decision{Intent: router.IntentLegal}},
+		&stubGeneral{}, legal, WithTracer(tracer))
+
+	disconnected := errors.New("client disconnected")
+	err := svc.Answer(tracedContext("req-3"), rag.Question{Text: "What does Article 45 say?"},
+		func(rag.Event) error { return disconnected })
+	if err == nil {
+		t.Fatal("expected the emit error to propagate")
+	}
+
+	// Answer never reached EventDone (emit failed on the very first event), so
+	// there is nothing meaningful to trace — a nil Result must not be recorded.
+	if tracer.calls.Load() != 0 {
+		t.Errorf("Trace called %d times, want 0 — no completed answer to describe", tracer.calls.Load())
+	}
+}
+
+func TestNilTracerIsNeverCalled(t *testing.T) {
+	// No WithTracer option: Answer must not panic or otherwise assume a
+	// tracer exists. Every other test in this file already exercises this
+	// path implicitly; this one names it.
+	svc := newService(t, &stubRouter{decision: router.Decision{Intent: router.IntentLegal}},
+		&stubGeneral{}, &stubLegal{})
+
+	if err := svc.Answer(context.Background(), rag.Question{Text: "What does Article 45 say?"},
+		func(rag.Event) error { return nil }); err != nil {
+		t.Fatalf("Answer: %v", err)
 	}
 }

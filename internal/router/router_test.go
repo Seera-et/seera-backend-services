@@ -145,6 +145,110 @@ func TestRouteFailsTowardsTheLaw(t *testing.T) {
 	}
 }
 
+// callScriptedLLM answers Complete differently depending on which system
+// prompt it was asked with — translateSystemPrompt vs the router's own — so a
+// test can assert what the classification call actually saw, not just what
+// Route() ultimately returned.
+type callScriptedLLM struct {
+	translateResponse string
+	translateErr      error
+	classifyResponse  string
+
+	classifyReq ai.Request
+}
+
+func (s *callScriptedLLM) Model() string { return "stub" }
+
+func (s *callScriptedLLM) Stream(context.Context, ai.Request) (ai.Stream, error) {
+	return nil, errors.New("router must not stream")
+}
+
+func (s *callScriptedLLM) Complete(_ context.Context, req ai.Request) (string, *ai.Usage, error) {
+	if strings.Contains(req.System, "Translate the message to English") {
+		if s.translateErr != nil {
+			return "", nil, s.translateErr
+		}
+		return s.translateResponse, nil, nil
+	}
+	s.classifyReq = req
+	return s.classifyResponse, nil, nil
+}
+
+func TestRouteTranslatesEthiopicScriptForClassification(t *testing.T) {
+	llm := &callScriptedLLM{
+		translateResponse: "What is needed to form a private limited company?",
+		classifyResponse: decisionJSON(t, map[string]any{
+			"intent": "legal", "depth": "explain",
+			"search_text": "What is needed to form a private limited company?", "use_prior_sources": false,
+		}),
+	}
+
+	got := newRouter(llm).Route(context.Background(), Input{
+		Question: "የግል ውስን ኩባንያ ለማቋቋም ምን ያስፈልጋል?",
+	})
+
+	if got.Intent != IntentLegal {
+		t.Errorf("intent = %q, want %q — found live 2026-08-28, an Amharic legal question misclassified as general/out_of_scope when classified on the untranslated text", got.Intent, IntentLegal)
+	}
+	if !strings.Contains(llm.classifyReq.Messages[0].Content, "private limited company") {
+		t.Errorf("classification prompt = %q, want the English translation, not the Amharic original", llm.classifyReq.Messages[0].Content)
+	}
+}
+
+func TestRouteClassifiesOriginalTextWhenTranslationFails(t *testing.T) {
+	llm := &callScriptedLLM{
+		translateErr: errors.New("provider down"),
+		classifyResponse: decisionJSON(t, map[string]any{
+			"intent": "legal", "depth": "explain",
+			"search_text": "some rewrite", "use_prior_sources": false,
+		}),
+	}
+
+	got := newRouter(llm).Route(context.Background(), Input{
+		Question: "የግል ውስን ኩባንያ ለማቋቋም ምን ያስፈልጋል?",
+	})
+
+	if got.Fallback {
+		t.Error("a translation failure should not fail the whole decision — classification should proceed on the original text")
+	}
+	if !strings.Contains(llm.classifyReq.Messages[0].Content, "የግል ውስን ኩባንያ") {
+		t.Errorf("classification prompt = %q, want the original Amharic text when translation fails", llm.classifyReq.Messages[0].Content)
+	}
+}
+
+func TestRouteSkipsTranslationForEnglishQuestions(t *testing.T) {
+	llm := &callScriptedLLM{
+		translateResponse: "should never be used",
+		classifyResponse: decisionJSON(t, map[string]any{
+			"intent": "legal", "depth": "explain",
+			"search_text": "How do I register a company?", "use_prior_sources": false,
+		}),
+	}
+
+	newRouter(llm).Route(context.Background(), Input{Question: "How do I register a company?"})
+
+	if !strings.Contains(llm.classifyReq.Messages[0].Content, "How do I register a company?") {
+		t.Errorf("classification prompt = %q, want the original English text untouched", llm.classifyReq.Messages[0].Content)
+	}
+}
+
+// Found live, 2026-08-31: maxTurnRunes at 700 truncated a long structured
+// answer before a lettered section ("B. Formation of a One Member PLC") the
+// reader then asked about ("tell me more about... under B"), so the router
+// never saw what "B" referred to. maxTurnRunes was raised to 4000; this locks
+// in that a realistic long answer's later content now survives.
+func TestBuildPromptKeepsLateContentWithinRaisedRuneCap(t *testing.T) {
+	long := strings.Repeat("filler ", 500) + "B. Formation of a One Member PLC — MARKER"
+
+	prompt := buildPrompt(Input{
+		History: []Turn{{Role: ai.RoleAssistant, Text: long}},
+	})
+
+	if !strings.Contains(prompt, "MARKER") {
+		t.Error("a marker placed past the old 700-rune cap did not survive trimHistory")
+	}
+}
+
 func TestDiscussionAlwaysCarriesItsSources(t *testing.T) {
 	// The model said discussion but forgot the flag; the sources are the whole
 	// point of the intent, so they are carried anyway.

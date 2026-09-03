@@ -234,6 +234,32 @@ func TestDoneEventAlwaysCarriesACitationsArray(t *testing.T) {
 	}
 }
 
+// Found live, 2026-09-03: rag.Result.Unverified was added (citation
+// mechanical/entailment checks) but never mapped into donePayload, so the
+// signal was silently dropped between the answer path and the wire — every
+// live check looked like "nothing flagged" whether or not anything actually
+// was. This pins the mapping so the same class of gap (a Result field added
+// but never carried into the HTTP response) cannot recur silently.
+func TestDoneEventCarriesUnverifiedCitations(t *testing.T) {
+	answerer := &stubAnswerer{events: []rag.Event{
+		{Type: rag.EventDone, Citations: []rag.Citation{{Marker: "S1"}}, Result: &rag.Result{
+			Grounded:   true,
+			Unverified: []string{"S1"},
+		}},
+	}}
+
+	rec := post(t, newTestHandler(answerer), `{"question":"q"}`)
+
+	events := parseSSE(t, rec.Body.String())
+	var payload donePayload
+	if err := json.Unmarshal([]byte(events[len(events)-1][1]), &payload); err != nil {
+		t.Fatalf("done payload is not valid JSON: %v", err)
+	}
+	if len(payload.Unverified) != 1 || payload.Unverified[0] != "S1" {
+		t.Errorf("Unverified = %v, want [S1]", payload.Unverified)
+	}
+}
+
 // An exhausted provider quota is not a fault in this service, and saying so is
 // both true and actionable. The embedding quota takes down retrieval and
 // therefore every answer, so this is the likeliest operational failure there is.

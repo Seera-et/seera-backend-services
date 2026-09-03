@@ -68,6 +68,7 @@ type Service struct {
 	legal    LegalEngine
 	prefetch Prefetcher
 	sources  SourceLabeller
+	tracer   Tracer
 
 	// candidates mirrors rag.Config.Candidates, so a speculative retrieval
 	// returns the same set the legal engine would have fetched itself.
@@ -100,6 +101,12 @@ func WithSourceLabels(l SourceLabeller) Option {
 	return func(s *Service) { s.sources = l }
 }
 
+// WithTracer records what each request decided, for debugging after the
+// fact. See Tracer's doc comment for what is and isn't recorded.
+func WithTracer(t Tracer) Option {
+	return func(s *Service) { s.tracer = t }
+}
+
 func New(r Router, general GeneralEngine, legal LegalEngine, log *slog.Logger, opts ...Option) *Service {
 	s := &Service{
 		router:     r,
@@ -128,6 +135,13 @@ func (s *Service) Answer(ctx context.Context, q rag.Question, emit func(rag.Even
 		History:      toRouterTurns(q.History),
 		PriorSources: s.priorSourceLabels(ctx, q.CarriedChunks),
 	})
+
+	// Recorded regardless of which path below answers, or whether either
+	// errors: a nil captured Result (the client disconnected, or the engine
+	// returned before EventDone) is simply not traced — see recordTrace.
+	var captured *rag.Result
+	defer func() { s.recordTrace(ctx, decision, captured) }()
+	emit = capturingEmit(emit, &captured)
 
 	if err := emit(rag.Event{Type: rag.EventRoute, Route: &rag.Route{
 		Intent:         routeLabel(decision),

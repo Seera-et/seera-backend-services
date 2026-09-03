@@ -230,6 +230,12 @@ type donePayload struct {
 	// Confidence summarises how much evidence backs this answer. Absent on
 	// results that never reached generation (abstention, conversation).
 	Confidence *rag.Confidence `json:"confidence,omitempty"`
+
+	// Unverified lists the markers of citations checkCitations flagged as not
+	// actually supported by their source's text — see rag.Result.Unverified.
+	// Absent (not merely empty) when nothing was flagged, so the client can
+	// distinguish "checked, nothing wrong" from "field not sent."
+	Unverified []string `json:"unverified,omitempty"`
 }
 
 // routePayload is the `route` event: what the router decided, sent before

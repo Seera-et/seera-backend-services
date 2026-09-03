@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/Seera-et/seera-backend-services/internal/ai"
+	"github.com/Seera-et/seera-backend-services/internal/lang"
 )
 
 // Intent is which engine should answer.
@@ -156,8 +157,23 @@ const (
 	MaxOutputTokens = 200
 
 	// maxHistoryTurns and maxTurnRunes bound what is quoted back to the model.
+	//
+	// maxTurnRunes truncates from the front, keeping the start of a turn and
+	// dropping its end. Raised from 700, 2026-08-31: found live, a follow-up
+	// referencing a lettered section near the end of a long structured answer
+	// ("under B") could not be resolved, because the router never saw "B" at
+	// all — it sat well past 700 runes into the prior assistant turn. 700 was
+	// sized for the shorter, less structured answers this system produced
+	// before rule 13 in grounding.go started asking for richer, multi-section
+	// answers; it was never revisited when that changed. 4000 comfortably fits
+	// a realistic structured answer (this one was ~3,800 runes) without
+	// meaningfully growing the router's prompt against context windows in the
+	// hundred-thousand-token range. Kept equal to rag.MaxTurnRunes so
+	// classification and generation see the same amount of prior content —
+	// this bug specifically was routing not seeing what generation would
+	// have.
 	maxHistoryTurns = 6
-	maxTurnRunes    = 700
+	maxTurnRunes    = 4000
 
 	// maxPriorSources bounds the source labels listed for reference.
 	maxPriorSources = 10
@@ -187,10 +203,33 @@ func (r *Router) Route(ctx context.Context, in Input) Decision {
 	ctx, cancel := context.WithTimeout(ctx, Timeout)
 	defer cancel()
 
+	// Classification runs on English cues throughout systemPrompt's category
+	// descriptions ("sports", "chit-chat", "registration", "licensing"...).
+	// Found live, 2026-08-28: an Amharic question about forming a private
+	// limited company — a real "legal" case — was classified "general" /
+	// "out_of_scope" by the model, evidently because it didn't weigh Ethiopic
+	// script against those English examples the way it weighs English text.
+	// Translating just for classification fixes that without touching
+	// SearchText's own language handling below, which already resolves
+	// through search.Service's own translation (WithTranslation) once
+	// retrieval runs. Best-effort: a translation failure classifies the
+	// original text, exactly what happened before this existed.
+	classifyIn := in
+	if lang.HasEthiopicScript(question) {
+		translated, err := lang.Translate(ctx, r.llm, question)
+		switch {
+		case err != nil:
+			r.log.WarnContext(ctx, "cross-lingual routing translation failed, classifying the original text",
+				slog.Any("error", err))
+		case translated != "":
+			classifyIn.Question = translated
+		}
+	}
+
 	start := time.Now()
 	raw, _, err := r.llm.Complete(ctx, ai.Request{
 		System:     systemPrompt,
-		Messages:   []ai.Message{{Role: ai.RoleUser, Content: buildPrompt(in)}},
+		Messages:   []ai.Message{{Role: ai.RoleUser, Content: buildPrompt(classifyIn)}},
 		MaxTokens:  MaxOutputTokens,
 		JSONSchema: decisionSchema,
 	})
