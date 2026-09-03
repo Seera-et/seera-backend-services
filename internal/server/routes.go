@@ -53,15 +53,34 @@ func (s *Server) routes() http.Handler {
 		// Admin API. Registered only when a token is configured: an
 		// unauthenticated write path into the legal corpus must not exist even
 		// by accident, so a missing token disables the route rather than
-		// leaving it open.
-		if s.handlers.Ingest != nil && !s.cfg.AdminToken.Empty() {
+		// leaving it open. Mounted whenever any admin handler is wired, not
+		// just ingestion — trace lookup is read-only but still internal-only,
+		// so it shares the same guard rather than getting a weaker one.
+		hasAdminHandler := s.handlers.Ingest != nil || s.handlers.Traces != nil
+		if hasAdminHandler && !s.cfg.AdminToken.Empty() {
 			r.Route("/admin", func(r chi.Router) {
 				r.Use(requireAdminToken(s.cfg.AdminToken.Value()))
-				// A parsed legal code is several megabytes of JSON; the public
-				// limit would reject every real document.
-				r.Use(limitBody(s.cfg.MaxIngestBytes))
 
-				r.Method(http.MethodPost, "/documents/ingest", s.handlers.Ingest)
+				if s.handlers.Ingest != nil {
+					r.Group(func(r chi.Router) {
+						// A parsed legal code is several megabytes of JSON; the
+						// public limit would reject every real document.
+						r.Use(limitBody(s.cfg.MaxIngestBytes))
+						r.Method(http.MethodPost, "/documents/ingest", s.handlers.Ingest)
+					})
+				}
+				if s.handlers.Traces != nil {
+					// request_id is middleware.RequestID's own format
+					// ("<host>/<short-id>-<counter>"), which contains a literal
+					// slash. chi's radix tree tokenizes the path by "/" before a
+					// param is ever matched against it — even a regex param like
+					// {request_id:.*} only ever sees one segment — so a single
+					// named param silently truncates at the slash. A trailing
+					// wildcard is chi's own way to capture the rest of a path,
+					// slashes included; read back via chi.URLParam(r, "*") in
+					// tracing.Repository.Handler.
+					r.Method(http.MethodGet, "/traces/*", s.handlers.Traces)
+				}
 			})
 		}
 	})

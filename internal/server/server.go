@@ -50,6 +50,10 @@ type Handlers struct {
 
 	// CorpusStats serves GET /api/v1/corpus/stats.
 	CorpusStats http.Handler
+
+	// Traces serves GET /api/v1/admin/traces/{request_id} — looks up what one
+	// past request decided, for debugging.
+	Traces http.Handler
 }
 
 // Server is the HTTP server and everything it needs.

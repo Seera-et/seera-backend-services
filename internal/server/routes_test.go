@@ -107,6 +107,75 @@ func TestCORSOnlyEchoesAllowedOrigins(t *testing.T) {
 	}
 }
 
+// Traces is registered under /admin on its own — it must not require
+// ingestion to also be wired, since a deployment can want trace lookup
+// without an admin write path into the corpus.
+func TestTracesRouteRegistersWithoutIngestion(t *testing.T) {
+	srv := New(config.Config{
+		Env: "dev", Addr: ":0", MaxRequestBytes: 1 << 20,
+		RateLimitRPS: 100, RateLimitBurst: 100,
+		AdminToken: "secret",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), stubDB{}, Handlers{
+		Traces: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(chi.URLParam(r, "*")))
+		}),
+	})
+
+	// middleware.RequestID's own format contains a literal slash
+	// ("<host>/<short-id>-<counter>") — the route must capture all of it, not
+	// silently truncate at the first segment boundary.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/traces/host123/short-000001", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if rec.Body.String() != "host123/short-000001" {
+		t.Errorf("body = %q, want the full request_id (with its slash) to have reached the handler", rec.Body.String())
+	}
+}
+
+// The admin route must stay behind the token guard even when ingestion is
+// the handler that's missing and only Traces is wired.
+func TestTracesRouteRequiresAdminToken(t *testing.T) {
+	srv := New(config.Config{
+		Env: "dev", Addr: ":0", MaxRequestBytes: 1 << 20,
+		RateLimitRPS: 100, RateLimitBurst: 100,
+		AdminToken: "secret",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), stubDB{}, Handlers{
+		Traces: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+	})
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/traces/req-123", nil))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d without a token", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// No admin token configured at all must disable the route entirely, same as
+// it already does for ingestion — an unauthenticated admin endpoint must not
+// exist even by accident.
+func TestTracesRouteDisabledWithoutAdminToken(t *testing.T) {
+	srv := New(config.Config{
+		Env: "dev", Addr: ":0", MaxRequestBytes: 1 << 20,
+		RateLimitRPS: 100, RateLimitBurst: 100,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), stubDB{}, Handlers{
+		Traces: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+	})
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/traces/req-123", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d — the route must not exist without an admin token", rec.Code, http.StatusNotFound)
+	}
+}
+
 func TestRateLimiterAllowsBurstThenRejects(t *testing.T) {
 	l := newIPRateLimiter(0.0001, 2) // effectively no refill during the test
 
