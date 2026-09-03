@@ -10,6 +10,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Seera-et/seera-backend-services/internal/ai"
+	"github.com/Seera-et/seera-backend-services/internal/lang"
 	"github.com/Seera-et/seera-backend-services/internal/legal"
 )
 
@@ -113,18 +115,56 @@ type Service struct {
 	pool     *pgxpool.Pool
 	embedder ai.Embedder
 	table    string // embedding table for the configured model
+
+	// translator and log are only used by the cross-lingual augmentation
+	// WithTranslation enables. nil translator (the default) leaves Search's
+	// behavior exactly as it was before that existed.
+	translator ai.LLM
+	log        *slog.Logger
+}
+
+// Option configures optional collaborators.
+type Option func(*Service)
+
+// WithTranslation enables cross-lingual query augmentation: when a query
+// contains Ethiopic script, it is translated to English with one small LLM
+// call, and both the original and translated text are searched and fused
+// together through the same RRF every arm already goes through — no new
+// fusion logic, just one more candidate list feeding it.
+//
+// Language empty already searches both corpus languages (see Query.Language),
+// but that only helps when the vector/keyword arms can bridge the query's
+// language to the source's by themselves. Confirmed weak in practice,
+// 2026-08-22 (tests/evaluation/dataset/edge_cases_v1.yaml's edge-017): a real
+// Amharic question about content that exists only in the English Commercial
+// Code came back as a clean abstention rather than finding it.
+//
+// Does not touch the embedding model — the bigger, riskier lever
+// docs/QA_FEATURE_PLAN.md §2.1 reserves for if this isn't enough on its own.
+func WithTranslation(llm ai.LLM, log *slog.Logger) Option {
+	return func(s *Service) {
+		s.translator = llm
+		if log == nil {
+			log = slog.New(slog.DiscardHandler)
+		}
+		s.log = log
+	}
 }
 
 // NewService wires retrieval to an embedding space.
 //
 // The embedder is resolved to a table here rather than per query, so a model
 // with no table fails at construction instead of on a user's first question.
-func NewService(pool *pgxpool.Pool, embedder ai.Embedder) (*Service, error) {
+func NewService(pool *pgxpool.Pool, embedder ai.Embedder, opts ...Option) (*Service, error) {
 	table, err := legal.EmbeddingTable(embedder.Model(), embedder.Dimensions())
 	if err != nil {
 		return nil, err
 	}
-	return &Service{pool: pool, embedder: embedder, table: table}, nil
+	s := &Service{pool: pool, embedder: embedder, table: table}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 // Search retrieves candidates for a question.
@@ -158,20 +198,44 @@ func (s *Service) Search(ctx context.Context, q Query) ([]Result, error) {
 		}
 	}
 
-	vector, err := s.vectorSearch(ctx, q)
-	if err != nil {
-		return nil, fmt.Errorf("vector search: %w", err)
-	}
-	if len(vector) > 0 {
-		lists = append(lists, vector)
+	// Cross-lingual augmentation: an Ethiopic-script query also searches under
+	// its English translation, so content that only the vector/keyword arms'
+	// own multilingual reach would otherwise miss still surfaces. Best-effort
+	// — a translation failure searches the original text only, exactly what
+	// happened before this existed.
+	texts := []string{q.Text}
+	if s.translator != nil && lang.HasEthiopicScript(q.Text) {
+		translated, err := lang.Translate(ctx, s.translator, q.Text)
+		switch {
+		case err != nil:
+			s.log.WarnContext(ctx, "cross-lingual query translation failed, searching the original text only",
+				slog.Any("error", err))
+		case translated == "" || strings.EqualFold(translated, strings.TrimSpace(q.Text)):
+			// Nothing gained — empty, or the model just echoed the input back.
+		default:
+			texts = append(texts, translated)
+		}
 	}
 
-	keyword, err := s.keywordSearch(ctx, q)
-	if err != nil {
-		return nil, fmt.Errorf("keyword search: %w", err)
-	}
-	if len(keyword) > 0 {
-		lists = append(lists, keyword)
+	for _, text := range texts {
+		vq := q
+		vq.Text = text
+
+		vector, err := s.vectorSearch(ctx, vq)
+		if err != nil {
+			return nil, fmt.Errorf("vector search: %w", err)
+		}
+		if len(vector) > 0 {
+			lists = append(lists, vector)
+		}
+
+		keyword, err := s.keywordSearch(ctx, vq)
+		if err != nil {
+			return nil, fmt.Errorf("keyword search: %w", err)
+		}
+		if len(keyword) > 0 {
+			lists = append(lists, keyword)
+		}
 	}
 
 	fused := FuseRRF(lists...)
