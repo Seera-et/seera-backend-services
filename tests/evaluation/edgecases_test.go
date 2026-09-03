@@ -45,11 +45,11 @@ func buildDialogueStack(t *testing.T) *dialogue.Service {
 	}
 	llm := buildEvalLLM(t, gemini)
 
-	searchSvc, err := search.NewService(db.Pool, embedder)
+	searchSvc, err := search.NewService(db.Pool, embedder, search.WithTranslation(llm, evalLogger()))
 	if err != nil {
 		t.Fatalf("build search service: %v", err)
 	}
-	reranker, minRerankScore := buildRerankerForEval(t)
+	reranker, minRerankScore := buildRerankerForEval(t, llm)
 	citationSvc := citations.NewService(citations.NewRepository(db.Pool), evalLogger())
 
 	ragCfg := rag.DefaultConfig()

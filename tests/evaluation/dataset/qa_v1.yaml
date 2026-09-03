@@ -125,12 +125,69 @@ cases:
     should_abstain: false
     note: "Amharic: how is a business association formed? Same phrasing already used in routing_v1.yaml's legal-007."
 
+  # ---- More document-level ground truth (added 2026-08-28, larger sample) --
+  - id: qa-018
+    question: "What are the duties of a company's auditor?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-019
+    question: "What happens to a general partnership when one of the partners dies?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-020
+    question: "How is a joint venture different from other business organizations?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-021
+    question: "What rights do minority shareholders have in a share company?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-022
+    question: "How is the general meeting of a share company convened?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-023
+    question: "What is required to transfer shares in a private limited company?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-024
+    question: "What are the requirements for issuing a promissory note?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-025
+    question: "What are the requirements for issuing a cheque?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-026
+    question: "What happens when one business organization merges with another?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+  - id: qa-027
+    question: "What is required for the lease of business premises?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia"]
+    should_abstain: false
+
   # ---- Out of corpus (should abstain) ---------------------------------------
   - id: qa-015
     question: "What is the minimum wage under Kenyan labour law?"
     language: en
     should_abstain: true
     note: "A different country's law — nothing in this corpus should answer it."
+  - id: qa-028
+    question: "What does UK company law require for forming a private limited company?"
+    language: en
+    should_abstain: true
+    note: "A different country's law, phrased to closely resemble an in-corpus question — checks the router/retrieval don't get confused by surface similarity to qa-004."
   - id: qa-016
     question: "What does French company law require for forming an SARL?"
     language: en

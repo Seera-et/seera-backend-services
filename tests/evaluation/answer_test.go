@@ -90,7 +90,17 @@ func buildEvalLLM(t *testing.T, gemini *ai.GeminiLLM) ai.LLM {
 	if key == "" {
 		return gemini
 	}
-	fallback, err := ai.NewOpenRouterLLM(key)
+	opts := []ai.OpenRouterOption{}
+	if model := os.Getenv("OPENROUTER_MODEL"); model != "" {
+		// Not reading this was a real gap, not a style choice: production
+		// (cmd/api/main.go's buildLLM) has read OPENROUTER_MODEL since the
+		// fallback was added, so a run without this silently evaluated a
+		// different, less reliable model than the one actually deployed —
+		// found 2026-08-28 when a run still hit the free-tier auto-router
+		// after OPENROUTER_MODEL was set to a paid model in .env.
+		opts = append(opts, ai.WithOpenRouterModel(model))
+	}
+	fallback, err := ai.NewOpenRouterLLM(key, opts...)
 	if err != nil {
 		t.Logf("OpenRouter fallback unavailable (%v), evaluation runs on Gemini alone", err)
 		return gemini
@@ -104,16 +114,23 @@ func buildEvalLLM(t *testing.T, gemini *ai.GeminiLLM) ai.LLM {
 // here for the same reason routing_test.go duplicates router.New's wiring
 // rather than importing cmd/api: buildReranker is unexported, package main.
 // The threshold is only meaningful paired with a calibrated scorer.
-func buildRerankerForEval(t *testing.T) (rag.Reranker, float64) {
+//
+// llm is required, not optional: without Cohere, production reranks with
+// rag.LLMReranker (added 2026-08-28) rather than PassthroughReranker, and an
+// eval that still measured against the passthrough would be evaluating a
+// pipeline nobody runs. TestRetrievalQuality building an LLM now, when it
+// previously needed only embeddings, is the honest consequence of that
+// change — retrieval quality now depends on the same reranker generation does.
+func buildRerankerForEval(t *testing.T, llm ai.LLM) (rag.Reranker, float64) {
 	t.Helper()
 	key := os.Getenv("COHERE_API_KEY")
 	if key == "" {
-		return rag.PassthroughReranker{}, 0
+		return rag.NewLLMReranker(llm), rag.LLMRerankMinScore
 	}
 	reranker, err := rag.NewCohereReranker(key)
 	if err != nil {
-		t.Logf("Cohere reranker unavailable (%v), falling back to fusion order", err)
-		return rag.PassthroughReranker{}, 0
+		t.Logf("Cohere reranker unavailable (%v), using the LLM reranker instead", err)
+		return rag.NewLLMReranker(llm), rag.LLMRerankMinScore
 	}
 	return reranker, 0.15
 }
@@ -148,11 +165,17 @@ func TestRetrievalQuality(t *testing.T) {
 	embedder := buildEmbedder(t)
 	db := connectDB(t)
 
-	searchSvc, err := search.NewService(db.Pool, embedder)
+	gemini, err := ai.NewGeminiLLM(os.Getenv("GEMINI_API_KEY"))
+	if err != nil {
+		t.Fatalf("build LLM: %v", err)
+	}
+	llm := buildEvalLLM(t, gemini)
+
+	searchSvc, err := search.NewService(db.Pool, embedder, search.WithTranslation(llm, evalLogger()))
 	if err != nil {
 		t.Fatalf("build search service: %v", err)
 	}
-	reranker, _ := buildRerankerForEval(t)
+	reranker, _ := buildRerankerForEval(t, llm)
 
 	dataset, err := LoadAnswerDataset()
 	if err != nil {
@@ -163,6 +186,8 @@ func TestRetrievalQuality(t *testing.T) {
 		total                             int
 		fusedRecallHits, rerankRecallHits int
 		precisionSum                      float64
+		reciprocalRankSum                 float64
+		hit1, hit3                        int
 	)
 
 	for _, tc := range dataset.Cases {
@@ -197,6 +222,16 @@ func TestRetrievalQuality(t *testing.T) {
 			rerankRecallHits++
 		}
 
+		if rank := firstRelevantRank(reranked, tc); rank > 0 {
+			reciprocalRankSum += 1.0 / float64(rank)
+			if rank == 1 {
+				hit1++
+			}
+			if rank <= 3 {
+				hit3++
+			}
+		}
+
 		five := reranked
 		if len(five) > 5 {
 			five = five[:5]
@@ -219,9 +254,12 @@ func TestRetrievalQuality(t *testing.T) {
 	recallAt50 := float64(fusedRecallHits) / float64(total)
 	recallAt10 := float64(rerankRecallHits) / float64(total)
 	precisionAt5 := precisionSum / float64(total)
+	mrr := reciprocalRankSum / float64(total)
+	hitAt1 := float64(hit1) / float64(total)
+	hitAt3 := float64(hit3) / float64(total)
 
-	t.Logf("retrieval quality over %d cases: Recall@50(fused)=%.0f%%, Recall@10(reranked)=%.0f%%, Precision@5=%.0f%%",
-		total, recallAt50*100, recallAt10*100, precisionAt5*100)
+	t.Logf("retrieval quality over %d cases: Recall@50(fused)=%.0f%%, Recall@10(reranked)=%.0f%%, Precision@5=%.0f%%, MRR=%.2f, Hit@1=%.0f%%, Hit@3=%.0f%%",
+		total, recallAt50*100, recallAt10*100, precisionAt5*100, mrr, hitAt1*100, hitAt3*100)
 
 	// A wide margin, deliberately: this dataset is small and its ground truth
 	// is mostly document-level (see dataset.go), so this is a regression
@@ -239,6 +277,39 @@ func anyRelevant(results []search.Result, tc answerCase) bool {
 		}
 	}
 	return false
+}
+
+// firstRelevantRank returns the 1-based rank of the first relevant result in
+// results, or 0 if none is relevant. The basis for MRR and Hit@k: unlike
+// Recall/Precision at a fixed cutoff, this captures *how high* a relevant
+// result ranked, not just whether one appeared somewhere in a fixed-size
+// window.
+func firstRelevantRank(results []search.Result, tc answerCase) int {
+	for i, r := range results {
+		if isRelevant(r, tc) {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func TestFirstRelevantRank(t *testing.T) {
+	tc := answerCase{ExpectedDocumentTitles: []string{"Commercial Code"}, ExpectedArticleNos: []string{"499"}}
+	other := search.Result{DocumentTitle: "Commercial Code", ArticleNo: "1"}
+	match := search.Result{DocumentTitle: "Commercial Code", ArticleNo: "499"}
+
+	if got := firstRelevantRank(nil, tc); got != 0 {
+		t.Errorf("firstRelevantRank(nil) = %d, want 0", got)
+	}
+	if got := firstRelevantRank([]search.Result{other, other, other}, tc); got != 0 {
+		t.Errorf("firstRelevantRank(no match) = %d, want 0", got)
+	}
+	if got := firstRelevantRank([]search.Result{match, other, other}, tc); got != 1 {
+		t.Errorf("firstRelevantRank(match at 0) = %d, want 1", got)
+	}
+	if got := firstRelevantRank([]search.Result{other, other, match}, tc); got != 3 {
+		t.Errorf("firstRelevantRank(match at 2) = %d, want 3", got)
+	}
 }
 
 // answerResult is one case's outcome against a real, generating answer path.
@@ -267,19 +338,25 @@ func TestAnswerQuality(t *testing.T) {
 	}
 	llm := buildEvalLLM(t, gemini)
 
-	searchSvc, err := search.NewService(db.Pool, embedder)
+	searchSvc, err := search.NewService(db.Pool, embedder, search.WithTranslation(llm, evalLogger()))
 	if err != nil {
 		t.Fatalf("build search service: %v", err)
 	}
-	reranker, minRerankScore := buildRerankerForEval(t)
+	reranker, minRerankScore := buildRerankerForEval(t, llm)
 
 	citationSvc := citations.NewService(citations.NewRepository(db.Pool), evalLogger())
 
 	ragCfg := rag.DefaultConfig()
 	ragCfg.MinRerankScore = minRerankScore
+	// Mirrors cmd/api/main.go's ragCfg.MultiHop = cfg.MultiHop. Not read
+	// before 2026-08-28: this test built its rag.Service with MultiHop always
+	// at its zero-value false, so ANSWER_MULTI_HOP=true had no effect on it —
+	// the very comparison Gap 3 exists to run.
+	ragCfg.MultiHop = os.Getenv("ANSWER_MULTI_HOP") == "true"
 	svc := rag.NewService(searchSvc, reranker, llm, ragCfg, evalLogger(),
 		rag.WithSources(citationSvc),
 		rag.WithArticles(searchSvc))
+	t.Logf("multi_hop=%v", ragCfg.MultiHop)
 
 	dataset, err := LoadAnswerDataset()
 	if err != nil {
