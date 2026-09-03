@@ -77,14 +77,18 @@ var expandSchema = &ai.Schema{
 // expand runs the second pass and returns the enlarged result set.
 //
 // Every failure returns the original set unchanged: an answer that could have
-// been better is not a reason to have no answer.
+// been better is not a reason to have no answer. reranked mirrors rerankTop's
+// second return on every path — unchanged from the value passed in for the
+// early-exit cases, and the fresh rerank's own status on the final path,
+// where a second rerank actually happens.
 func (s *Service) expand(
 	ctx context.Context,
 	q Question,
 	searchText string,
 	top []search.Result,
+	reranked bool,
 	topN int,
-) ([]search.Result, int64) {
+) ([]search.Result, bool, int64) {
 	start := time.Now()
 
 	expandCtx, cancel := context.WithTimeout(ctx, expandTimeout)
@@ -94,16 +98,16 @@ func (s *Service) expand(
 	if err != nil {
 		s.log.WarnContext(ctx, "second retrieval pass skipped",
 			slog.Any("error", err))
-		return top, time.Since(start).Milliseconds()
+		return top, reranked, time.Since(start).Milliseconds()
 	}
 	if len(plan.ArticleNumbers) == 0 && plan.FollowUpQuery == "" {
 		// The common case: the first retrieval was enough.
-		return top, time.Since(start).Milliseconds()
+		return top, reranked, time.Since(start).Milliseconds()
 	}
 
 	extra := s.fetchExpansion(expandCtx, q, plan)
 	if len(extra) == 0 {
-		return top, time.Since(start).Milliseconds()
+		return top, reranked, time.Since(start).Milliseconds()
 	}
 
 	merged := mergeSources(top, extra)
@@ -114,8 +118,8 @@ func (s *Service) expand(
 
 	// Reranked again so the additions compete with the originals rather than
 	// being appended to the end of a list the budget may never reach.
-	return s.rerankTop(ctx, searchText, merged, topN+maxExtraResults),
-		time.Since(start).Milliseconds()
+	rerankedTop, ok := s.rerankTop(ctx, searchText, merged, topN+maxExtraResults)
+	return rerankedTop, ok, time.Since(start).Milliseconds()
 }
 
 type expansionPlan struct {

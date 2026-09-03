@@ -13,9 +13,21 @@ const (
 	// not on the whole session.
 	MaxHistoryTurns = 8
 
-	// MaxTurnRunes truncates one earlier turn. Answers are the long ones, and the
-	// end of a long answer is rarely what a follow-up refers to.
-	MaxTurnRunes = 1200
+	// MaxTurnRunes truncates one earlier turn, keeping its start and dropping
+	// its end.
+	//
+	// Raised from 1200, 2026-08-31: this comment used to claim "the end of a
+	// long answer is rarely what a follow-up refers to" — found live to be
+	// false for exactly the answers this system now produces. A structured,
+	// multi-section reply (rule 13 in grounding.go asks for these) is
+	// routinely referenced by its later sections — "under B", "the third
+	// point" — and 1200 runes cut a real ~3,800-rune answer off before its
+	// "B." section, so a follow-up asking about it had no prior content to
+	// resolve the reference against. Kept equal to router.maxTurnRunes: the
+	// two must agree on how much prior content exists, or routing can miss a
+	// reference generation would have understood, which is what happened
+	// here.
+	MaxTurnRunes = 4000
 )
 
 // Turn is one earlier exchange, supplied by the client.
