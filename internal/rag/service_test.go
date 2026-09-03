@@ -256,6 +256,38 @@ func TestAnswerSurvivesRerankerFailure(t *testing.T) {
 	}
 }
 
+// Regression test for a real failure found live, 2026-08-28: with a
+// calibrated reranker threshold configured (Cohere's 0.15, or the new LLM
+// reranker's LLMRerankMinScore), a reranker failure degraded to raw fusion
+// order — RRF scores, a completely different and much smaller scale — and
+// shouldAbstain compared that fusion score against the reranker's threshold
+// anyway, abstaining on every single request regardless of how relevant
+// retrieval actually was. TestAnswerSurvivesRerankerFailure above didn't
+// catch this because it uses DefaultConfig()'s zero MinRerankScore, which
+// never exercises the threshold check at all.
+func TestRerankerFailureWithACalibratedThresholdDoesNotAbstain(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MinRerankScore = 0.3 // matches rag.LLMRerankMinScore in shape, not value
+
+	svc := newTestService(
+		&stubRetriever{results: testResults(3)},
+		&stubLLM{chunks: []string{"Formed by two persons [S1]."}},
+		failingReranker{}, cfg)
+
+	events, err := collect(t, svc, Question{Text: "formation?"})
+	if err != nil {
+		t.Fatalf("Answer() = %v", err)
+	}
+
+	done := events[len(events)-1]
+	if done.Result.Abstained {
+		t.Error("a reranker failure abstained because fusion-order scores were compared against a reranker threshold they were never on the scale for")
+	}
+	if len(done.Citations) != 1 {
+		t.Errorf("got %d citations, want 1", len(done.Citations))
+	}
+}
+
 func TestAnswerPassesFiltersToRetrieval(t *testing.T) {
 	retriever := &stubRetriever{results: testResults(1)}
 	svc := newTestService(retriever, &stubLLM{chunks: []string{"x [S1]"}},

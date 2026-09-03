@@ -59,6 +59,12 @@ type Config struct {
 	// RRF value on an unrelated scale, so wiring must leave this at zero and let
 	// "no candidates at all" be the only abstention trigger.
 	MinRerankScore float64
+
+	// CitationEntailment enables the post-generation verification pass (see
+	// Verifier). Mirrors config.Config's field of the same name, threaded
+	// through separately so rag package tests can exercise it without
+	// depending on internal/config.
+	CitationEntailment bool
 }
 
 // DefaultConfig is the tuned starting point.
@@ -108,6 +114,7 @@ type Service struct {
 	llm       ai.LLM
 	sources   SourceResolver
 	articles  ArticleFinder
+	verifier  Verifier
 	cfg       Config
 	log       *slog.Logger
 }
@@ -129,6 +136,13 @@ func WithSources(resolver SourceResolver) Option {
 // WithArticles supplies exact-article lookup, used by the second retrieval pass.
 func WithArticles(finder ArticleFinder) Option {
 	return func(s *Service) { s.articles = finder }
+}
+
+// WithVerifier supplies the citation-entailment checker. Only consulted when
+// Config.CitationEntailment is also on — see that field's doc comment; a
+// verifier configured without the flag set simply never runs.
+func WithVerifier(v Verifier) Option {
+	return func(s *Service) { s.verifier = v }
 }
 
 func NewService(
@@ -303,6 +317,16 @@ type Result struct {
 	// it is simply absent on results that never reached generation
 	// (abstention, conversation) rather than a misleading zero value.
 	Confidence *Confidence `json:"confidence,omitempty"`
+
+	// Unverified lists the markers of citations checkCitations judged
+	// unsupported by their source's actual text — distinct from Grounded,
+	// which only says every claim carries *some* citation. Populated by two
+	// independent checks: a free mechanical one (lexicallySupported, always
+	// runs) and an experimental semantic one (Verifier, only when
+	// Config.CitationEntailment is on) — see checkCitations. Nil means
+	// neither check flagged anything, not that nothing was checked; the
+	// mechanical half always runs.
+	Unverified []string `json:"unverified,omitempty"`
 }
 
 // Timings is the per-stage latency breakdown the SRS asks to be logged.
@@ -357,7 +381,14 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	// client sends identifiers; the text always comes from here.
 	carried := s.carriedSources(ctx, q.CarriedChunks)
 
-	var top []search.Result
+	var (
+		top []search.Result
+		// topScore is the best score this request's rerank produced, kept for
+		// the abstention log: "retrieval found nothing" and "retrieval found
+		// six provisions the threshold rejected" are different bugs and used
+		// to look identical.
+		topScore float64
+	)
 	if q.SkipRetrieval && len(carried) > 0 {
 		// The router judged the sources already cited are enough — no fresh
 		// search, no rerank (there is nothing new to rank against), and no
@@ -374,15 +405,32 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 		timings.Retrieval = retrievalMS
 		timings.CandidateN = len(candidates)
 
+		var reranked bool
 		rerankStart := time.Now()
-		top = s.rerankTop(ctx, searchText, candidates, topN)
+		top, reranked = s.rerankTop(ctx, searchText, candidates, topN)
 		timings.Rerank = time.Since(rerankStart).Milliseconds()
 
 		// A second retrieval pass for what the first one missed. Off unless enabled.
 		if s.cfg.MultiHop && len(top) > 0 {
 			var expandMS int64
-			top, expandMS = s.expand(ctx, q, searchText, top, topN)
+			top, reranked, expandMS = s.expand(ctx, q, searchText, top, reranked, topN)
 			timings.Expand = expandMS
+		}
+
+		// The threshold is applied here, to this request's reranked retrieval,
+		// before carried sources join it. A carried source carries no score on
+		// the reranker's scale — nothing scored it for this question — and
+		// mergeSources deliberately puts it first, so asking this after the
+		// merge read a zero no reranker ever produced and abstained on every
+		// follow-up that carried anything at all.
+		topScore, _ = bestRerankedScore(top)
+		if belowThreshold(top, reranked, s.cfg.MinRerankScore) {
+			// Nothing retrieval found is about this question. Carried sources
+			// still may be, and they become all the evidence this answer gets —
+			// the same shape the SkipRetrieval branch above produces. Keeping
+			// the rejected chunks as filler would only invite a citation to a
+			// provision already judged irrelevant.
+			top = nil
 		}
 
 		// Carried sources lead: they are what a follow-up is about, and putting
@@ -392,14 +440,14 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 		timings.CarriedN = len(carried)
 	}
 
-	if s.shouldAbstain(top) {
-		return s.abstain(ctx, q, timings, start, emit)
+	if len(top) == 0 {
+		return s.abstain(ctx, q, timings, topScore, start, emit)
 	}
 
 	built := BuildContext(top, s.cfg.ContextTokenBudget)
 	timings.ContextChunk = len(built.Sources)
 	if len(built.Sources) == 0 {
-		return s.abstain(ctx, q, timings, start, emit)
+		return s.abstain(ctx, q, timings, topScore, start, emit)
 	}
 	confidence := confidenceFrom(top, len(built.Sources), s.cfg.MinRerankScore)
 
@@ -489,6 +537,13 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	// of plausible references.
 	cited := filterCitations(citations, used)
 
+	// The mechanical half of this always runs (see checkCitations); the
+	// semantic half only when Config.CitationEntailment is on. Runs after
+	// every token has already streamed to the reader — this can only delay
+	// the final citations/done event, never time-to-first-token or the
+	// visible answer.
+	unverified := s.checkCitations(ctx, answer.String(), cited)
+
 	timings.Total = time.Since(start).Milliseconds()
 	// The model said the provisions do not settle the question. That is a
 	// different outcome from an answer, and a different one again from finding
@@ -511,6 +566,7 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 		Model:      s.llm.Model(),
 		Reranker:   s.reranker.Name(),
 		Confidence: &confidence,
+		Unverified: unverified,
 	}
 
 	s.logAnswer(ctx, q, result, filter.Invalid(), built.Dropped)
@@ -518,23 +574,97 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	return emit(Event{Type: EventDone, Citations: cited, Result: &result})
 }
 
-// shouldAbstain decides whether there is enough evidence to answer at all.
-func (s *Service) shouldAbstain(top []search.Result) bool {
-	if len(top) == 0 {
-		return true
+// checkCitations flags citations that fail either of two independent checks
+// and returns their markers, in the order the claims first appear.
+//
+// The mechanical check (lexicallySupported) is free and always runs. The
+// semantic check (Verifier) is experimental and only runs when
+// Config.CitationEntailment and a Verifier are both set — see that field's
+// doc comment. A Verifier failure (provider error, malformed response) is
+// logged and treated as "nothing more to report," the same posture
+// rerankTop already takes toward a reranker failure: neither check may ever
+// take away a signal the other found, or fail the answer they describe.
+func (s *Service) checkCitations(ctx context.Context, answer string, cited []Citation) []string {
+	claims := extractClaims(answer, cited)
+	if len(claims) == 0 {
+		return nil
 	}
-	if s.cfg.MinRerankScore > 0 && top[0].Score < s.cfg.MinRerankScore {
-		return true
+
+	flagged := make(map[string]bool, len(claims))
+	for _, c := range claims {
+		if !lexicallySupported(c.Text, c.Source) {
+			flagged[c.Marker] = true
+		}
 	}
-	return false
+
+	if s.cfg.CitationEntailment && s.verifier != nil {
+		verdicts, err := s.verifier.Verify(ctx, claims)
+		if err != nil {
+			s.log.WarnContext(ctx, "citation entailment check failed, skipping", slog.Any("error", err))
+		} else {
+			for i, ok := range verdicts {
+				if !ok {
+					flagged[claims[i].Marker] = true
+				}
+			}
+		}
+	}
+
+	if len(flagged) == 0 {
+		return nil
+	}
+	unverified := make([]string, 0, len(flagged))
+	for _, c := range claims {
+		if flagged[c.Marker] {
+			unverified = append(unverified, c.Marker)
+		}
+	}
+	return unverified
 }
 
-func (s *Service) abstain(ctx context.Context, q Question, timings Timings, start time.Time, emit func(Event) error) error {
+// belowThreshold reports whether this request's reranked retrieval failed to
+// clear the abstention bar.
+//
+// It asks only about retrieval. Whether there is enough evidence to answer at
+// all is a separate question, settled by the caller once carried sources have
+// been merged in — conflating the two is what made a follow-up abstain while
+// holding the provision it was asking about.
+//
+// reranked is false when rerankTop fell back to raw fusion order — those scores
+// are on an RRF scale, not the reranker's, and comparing them against
+// MinRerankScore would reject nearly everything. Skip the threshold entirely in
+// that case.
+func belowThreshold(top []search.Result, reranked bool, minScore float64) bool {
+	if !reranked || minScore <= 0 {
+		return false
+	}
+	best, scored := bestRerankedScore(top)
+	return scored && best < minScore
+}
+
+// abstain reports that there was not enough evidence to answer.
+//
+// topScore is the best score this request's rerank produced, or zero when
+// nothing was scored. It is logged rather than used: without it, a threshold
+// rejecting good retrieval and retrieval genuinely finding nothing produce the
+// same line, and telling them apart meant reading the code.
+func (s *Service) abstain(
+	ctx context.Context,
+	q Question,
+	timings Timings,
+	topScore float64,
+	start time.Time,
+	emit func(Event) error,
+) error {
 	timings.Total = time.Since(start).Milliseconds()
 
 	s.log.InfoContext(ctx, "abstained",
 		slog.Int("candidates", timings.CandidateN),
+		slog.Int("carried", timings.CarriedN),
 		slog.String("language", string(q.Language)),
+		slog.String("reranker", s.reranker.Name()),
+		slog.Float64("min_rerank_score", s.cfg.MinRerankScore),
+		slog.Float64("top_score", topScore),
 		slog.Int64("retrieval_ms", timings.Retrieval))
 
 	if err := emit(Event{Type: EventSources, Citations: []Citation{}}); err != nil {

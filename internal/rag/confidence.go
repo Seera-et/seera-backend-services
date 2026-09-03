@@ -46,7 +46,12 @@ func confidenceFrom(top []search.Result, sourceCount int, minRerankScore float64
 	// reranker the score is an uncalibrated RRF value, so minRerankScore is
 	// zero and this comparison never fires — the same guard Config documents
 	// for abstention.
-	calibratedStrong := minRerankScore > 0 && top[0].Score >= minRerankScore*1.5
+	//
+	// Read through bestRerankedScore rather than off top[0]: a carried source
+	// leads the list with a zero Score that nothing judged, which would report
+	// every follow-up as weakly supported no matter how strong its retrieval.
+	best, scored := bestRerankedScore(top)
+	calibratedStrong := minRerankScore > 0 && scored && best >= minRerankScore*1.5
 
 	level := ConfidenceMedium
 	switch {

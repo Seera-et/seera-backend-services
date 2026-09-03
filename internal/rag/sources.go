@@ -90,6 +90,28 @@ func carriedResult(c citations.Citation) search.Result {
 // being able to see.
 const RetrieverCarried search.Retriever = "carried"
 
+// bestRerankedScore returns the highest score among results this request
+// actually reranked, and whether there were any.
+//
+// Carried sources are skipped, and that is the whole point. Their Score is a
+// zero value, not a judgement — no reranker saw them this time round — so any
+// threshold that reads it concludes "irrelevant" about the one provision the
+// reader is most plainly asking about. Because mergeSources puts carried
+// sources first, reading top[0].Score did exactly that, and abstained on every
+// follow-up that carried anything.
+//
+// Results arrive carried-block-first and then in reranked order, so the first
+// non-carried entry is already the best scored one.
+func bestRerankedScore(top []search.Result) (float64, bool) {
+	for _, r := range top {
+		if r.Retriever == RetrieverCarried {
+			continue
+		}
+		return r.Score, true
+	}
+	return 0, false
+}
+
 // retrieve runs retrieval, or accepts what the caller already fetched.
 func (s *Service) retrieve(
 	ctx context.Context,
@@ -117,15 +139,25 @@ func (s *Service) retrieve(
 	return candidates, time.Since(start).Milliseconds(), nil
 }
 
-// rerankTop reduces the candidate set to the few that reach the generator.
+// rerankTop reduces the candidate set to the few that reach the generator,
+// and reports whether the reranker actually produced the ordering.
+//
+// The second return matters beyond logging: shouldAbstain's threshold is
+// calibrated to a specific reranker's score scale (0.15 for Cohere's
+// relevance score, LLMRerankMinScore for the LLM reranker's 0-1 judgment).
+// A failed rerank falls back to raw fusion order, whose RRF scores live on a
+// completely different, much smaller scale — comparing them against a
+// reranker's threshold would abstain on nearly everything, not degrade
+// gracefully. The caller uses this to skip that comparison when reranking
+// didn't happen, exactly as done as if there were no reranker at all.
 func (s *Service) rerankTop(
 	ctx context.Context,
 	searchText string,
 	candidates []search.Result,
 	topN int,
-) []search.Result {
+) ([]search.Result, bool) {
 	if len(candidates) == 0 {
-		return candidates
+		return candidates, false
 	}
 
 	// Reranked against the same text retrieval used, not the raw follow-up:
@@ -139,11 +171,11 @@ func (s *Service) rerankTop(
 			slog.String("reranker", s.reranker.Name()),
 			slog.Any("error", err))
 		if len(candidates) > topN {
-			return candidates[:topN]
+			return candidates[:topN], false
 		}
-		return candidates
+		return candidates, false
 	}
-	return top
+	return top, true
 }
 
 // mergeSources puts carried sources first and drops duplicates.

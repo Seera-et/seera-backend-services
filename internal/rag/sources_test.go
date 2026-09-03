@@ -145,6 +145,121 @@ func TestCarriedSourcesPreventAnUnnecessaryAbstention(t *testing.T) {
 	}
 }
 
+// Regression test for a real failure found live, 2026-09-03: with a reranker
+// threshold configured (the LLM reranker's 0.3, or Cohere's 0.15), every
+// follow-up that carried sources abstained — including one whose answer,
+// Article 499, this very conversation had already cited a turn earlier.
+//
+// mergeSources puts carried sources first, by design, and carriedResult leaves
+// their Score at the zero value because no reranker scored them for this
+// question. shouldAbstain then read top[0].Score and compared that zero against
+// the threshold, so the comparison was true on every such request no matter how
+// good retrieval had been. Every existing carried-source test missed it by
+// using DefaultConfig()'s zero MinRerankScore, which never runs the check.
+func TestCarriedSourcesSurviveARerankerThreshold(t *testing.T) {
+	resolver := &stubResolver{byID: map[legal.ChunkID]citations.Citation{
+		"carried-1": carriedCitation("carried-1", "499"),
+	}}
+
+	cfg := DefaultConfig()
+	cfg.MinRerankScore = 0.3 // matches rag.LLMRerankMinScore in shape, not value
+
+	// Retrieval is good: testResults scores 0.9, comfortably over the bar.
+	svc := NewService(&stubRetriever{results: testResults(2)},
+		PassthroughReranker{}, &stubLLM{chunks: []string{"An answer [S1]."}},
+		cfg, testLogger(), WithSources(resolver))
+
+	events, err := collect(t, svc, Question{
+		Text:          "what are the conditions for a private limited company?",
+		CarriedChunks: []legal.ChunkID{"carried-1"},
+	})
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	done := events[len(events)-1]
+	if done.Result.Abstained {
+		t.Fatal("abstained on a carried source's unscored zero, discarding retrieval that cleared the threshold")
+	}
+	if len(done.Citations) != 1 || done.Citations[0].ChunkID != "carried-1" {
+		t.Errorf("citations = %v, want the carried chunk", done.Citations)
+	}
+}
+
+// When retrieval finds nothing above the bar, the provisions already on screen
+// are the answer's evidence — and the only evidence. The rejected chunks are
+// not kept as filler: something the reranker judged irrelevant is not improved
+// by being cited.
+func TestCarriedSourcesAnswerWhenRetrievalIsBelowThreshold(t *testing.T) {
+	weak := testResults(2)
+	for i := range weak {
+		weak[i].Score = 0.02
+	}
+
+	resolver := &stubResolver{byID: map[legal.ChunkID]citations.Citation{
+		"carried-1": carriedCitation("carried-1", "499"),
+	}}
+
+	cfg := DefaultConfig()
+	cfg.MinRerankScore = 0.3
+
+	svc := NewService(&stubRetriever{results: weak},
+		PassthroughReranker{}, &stubLLM{chunks: []string{"An answer [S1]."}},
+		cfg, testLogger(), WithSources(resolver))
+
+	events, err := collect(t, svc, Question{
+		Text:          "explain that one",
+		CarriedChunks: []legal.ChunkID{"carried-1"},
+	})
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+
+	done := events[len(events)-1]
+	if done.Result.Abstained {
+		t.Fatal("abstained while holding the provision the question was about")
+	}
+
+	sources := events[0].Citations
+	if len(sources) != 1 || sources[0].ChunkID != "carried-1" {
+		var ids []string
+		for _, c := range sources {
+			ids = append(ids, string(c.ChunkID))
+		}
+		t.Errorf("generator saw %v, want only the carried chunk", ids)
+	}
+}
+
+func TestBestRerankedScoreIgnoresCarriedSources(t *testing.T) {
+	carried := search.Result{ChunkID: "carried-1", Retriever: RetrieverCarried}
+
+	t.Run("skips the leading carried zero", func(t *testing.T) {
+		got, scored := bestRerankedScore([]search.Result{
+			carried,
+			{ChunkID: "chunk-1", Score: 0.8},
+			{ChunkID: "chunk-2", Score: 0.4},
+		})
+		if !scored {
+			t.Fatal("reported nothing scored while holding reranked results")
+		}
+		if got != 0.8 {
+			t.Errorf("score = %v, want the best reranked score 0.8", got)
+		}
+	})
+
+	t.Run("reports nothing scored when only carried remain", func(t *testing.T) {
+		if _, scored := bestRerankedScore([]search.Result{carried}); scored {
+			t.Error("treated a carried source's zero value as a reranker judgement")
+		}
+	})
+
+	t.Run("reports nothing scored when empty", func(t *testing.T) {
+		if _, scored := bestRerankedScore(nil); scored {
+			t.Error("reported a score for no results")
+		}
+	})
+}
+
 func TestSearchTextOverridesTheQuestionForRetrieval(t *testing.T) {
 	retriever := &stubRetriever{results: testResults(1)}
 
