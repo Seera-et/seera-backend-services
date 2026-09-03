@@ -110,6 +110,18 @@ type openRouterMessage struct {
 // callers (router.parseDecision) that validate Gemini's structured output
 // already treat an unusable response as "fail towards the safe default"
 // rather than trusting the shape blindly.
+//
+// Strict is always false, not a stray default: OpenAI's strict mode requires
+// every schema object to carry "additionalProperties": false and every
+// property to be listed as required, neither of which ai.Schema (shared with
+// Gemini's translation, which needs neither) expresses. Found live,
+// 2026-08-28: with strict true, a real request 400'd — "'additionalProperties'
+// is required to be supplied and to be false" — which silently broke both the
+// router (fell back to its safe default, as designed) and the reranker (fell
+// back to unranked fusion order) every time this fallback was used. Verified
+// directly against the API that strict:false accepts the exact same schema
+// cleanly and the model still follows it, including an optional field like
+// "reason" that isn't in Required.
 type openRouterResponseFormat struct {
 	Type       string                `json:"type"`
 	JSONSchema *openRouterJSONSchema `json:"json_schema"`
@@ -168,7 +180,7 @@ func (o *OpenRouterLLM) buildRequest(ctx context.Context, req Request, stream bo
 			Type: "json_schema",
 			JSONSchema: &openRouterJSONSchema{
 				Name:   "response",
-				Strict: true,
+				Strict: false,
 				Schema: req.JSONSchema,
 			},
 		}

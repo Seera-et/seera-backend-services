@@ -186,13 +186,50 @@ type geminiGenerationConfig struct {
 	// for JSON.
 	ResponseMIMEType string  `json:"responseMimeType,omitempty"`
 	ResponseSchema   *Schema `json:"responseSchema,omitempty"`
+
+	ThinkingConfig *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
 }
+
+// geminiThinkingConfig disables Gemini's extended-thinking phase.
+//
+// Found live, 2026-08-28: gemini-3.5-flash now spends a hidden "thoughts"
+// pass before any visible output — confirmed directly against the API,
+// reproducing this codebase's exact router/reranker request shape. With a
+// 100-token budget, 92 tokens went to thoughtsTokenCount and the response cut
+// off (finishReason: MAX_TOKENS) after four visible tokens, before the JSON
+// ever started. thinkingBudget: 0 reproduces the identical request cleanly —
+// finishReason: STOP, valid JSON, 7 tokens total. This wasn't happening
+// earlier in the same session; the model's default behavior changed, not
+// this code.
+//
+// Disabled unconditionally, not just for structured calls: this pipeline's
+// reasoning is meant to happen visibly, in the prompted answer text
+// (grounding.go rule 5 — "reason only from the sources" — is an instruction
+// to show the work, not hide it), matching this project's own documented
+// choice of a fast, non-reasoning model for a retrieval-bound path
+// (docs/QA_FEATURE_PLAN.md: "generation here is retrieval-bound, not
+// reasoning-bound"). If evidence ever shows answer quality suffers without
+// it, that is a case for turning it back on with a real eval comparison, not
+// an assumption either way.
+//
+// Not the same knob GeminiDefaultModel's comment already tried
+// (thinkingConfig.thinkingLevel: "low", found to make 3.5-flash slower and
+// left unset): thinkingBudget: 0 is a different field, disables thinking
+// outright rather than reducing it, and is verified against the actual
+// failure this codebase hit today, not a latency experiment against
+// unbounded default thinking.
+type geminiThinkingConfig struct {
+	ThinkingBudget int `json:"thinkingBudget"`
+}
+
+var disableThinking = &geminiThinkingConfig{ThinkingBudget: 0}
 
 // buildRequest is shared by Stream and Complete, so the two cannot drift in how
 // they translate a Request.
 func buildRequest(req Request) (geminiGenerateRequest, error) {
 	body := geminiGenerateRequest{}
 	body.GenerationConfig.MaxOutputTokens = req.MaxTokens
+	body.GenerationConfig.ThinkingConfig = disableThinking
 
 	if req.JSONSchema != nil {
 		body.GenerationConfig.ResponseMIMEType = "application/json"

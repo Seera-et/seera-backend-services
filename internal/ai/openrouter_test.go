@@ -152,6 +152,18 @@ func TestOpenRouterCompleteSendsJSONSchemaWhenSet(t *testing.T) {
 	if format["type"] != "json_schema" {
 		t.Errorf("response_format.type = %v, want json_schema", format["type"])
 	}
+
+	jsonSchema, ok := format["json_schema"].(map[string]any)
+	if !ok {
+		t.Fatal("response_format.json_schema was not an object")
+	}
+	// Regression guard for the 2026-08-28 bug: strict:true without
+	// additionalProperties:false on every schema object 400s against real
+	// OpenAI-compatible models (e.g. openai/gpt-4o-mini). ai.Schema doesn't
+	// express additionalProperties, so this must stay false.
+	if strict, _ := jsonSchema["strict"].(bool); strict {
+		t.Error("json_schema.strict = true, want false — OpenAI strict mode requires additionalProperties:false on every schema object, which ai.Schema doesn't set")
+	}
 }
 
 func TestOpenRouterSurfacesAPIErrors(t *testing.T) {

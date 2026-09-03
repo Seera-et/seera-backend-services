@@ -326,6 +326,35 @@ func TestGeminiCompleteWithoutASchemaAsksForNoMIMEType(t *testing.T) {
 	}
 }
 
+// Regression test for a real failure found live, 2026-08-28: gemini-3.5-flash
+// started spending a hidden "thoughts" pass before any visible output,
+// consuming the entire token budget and truncating structured responses
+// (router decisions, rerank scores) before the JSON ever started —
+// reproduced directly against the API, confirmed fixed by thinkingBudget: 0.
+func TestGeminiRequestsDisableThinking(t *testing.T) {
+	var got geminiGenerateRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"Hello."}]}}]}`)
+	}))
+	defer server.Close()
+
+	llm, _ := NewGeminiLLM("test-key", WithGeminiBaseURL(server.URL))
+	if _, _, err := llm.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	if got.GenerationConfig.ThinkingConfig == nil {
+		t.Fatal("thinkingConfig was not sent")
+	}
+	if got.GenerationConfig.ThinkingConfig.ThinkingBudget != 0 {
+		t.Errorf("thinkingBudget = %d, want 0", got.GenerationConfig.ThinkingConfig.ThinkingBudget)
+	}
+}
+
 func TestGeminiCompleteSurfacesABlockedPrompt(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"promptFeedback":{"blockReason":"SAFETY"}}`)
