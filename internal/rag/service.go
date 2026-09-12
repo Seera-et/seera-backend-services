@@ -521,7 +521,33 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	}
 
 	used := filter.Used()
-	grounded := len(used) > 0 || !looksSubstantive(answer.String())
+	text := answer.String()
+	grounded := len(used) > 0 || !looksSubstantive(text)
+
+	// Rule 12 allows a general-guidance section only after the model has
+	// written NOT_IN_SOURCES, where the reader has already been told the
+	// sources do not settle the question. On an answer that did settle it, the
+	// section is uncited legal prose with nothing marking it as such — and
+	// because the answer around it cites plenty, len(used) > 0 holds and the
+	// whole thing goes out badged "Grounded". That is the one claim this
+	// product may never make wrongly.
+	//
+	// Observed live 2026-09-03: an answer citing Articles 495, 496 and 499 on
+	// private limited companies appended two sentences of general company-law
+	// commentary under the heading and was badged Grounded. Rare — 0 of 6
+	// replays reproduced it — but a rare wrong grounding claim is still a wrong
+	// grounding claim, and it is free to detect here because both facts are
+	// already in hand.
+	//
+	// Reported rather than stripped: the section is stated to be unverified, so
+	// the honest fix is to stop calling the answer fully grounded, not to
+	// silently delete text the reader may still want.
+	if !gate.Matched() && strings.Contains(text, GeneralGuidanceHeading) {
+		grounded = false
+		s.log.WarnContext(ctx, "answer added unsourced general guidance without reporting insufficient sources",
+			slog.Int("citations", len(used)),
+			slog.String("language", string(q.Language)))
+	}
 
 	// An answer that hit the output limit stops mid-sentence, and on a legal
 	// answer the half that is missing is often the condition that changes the
@@ -542,7 +568,7 @@ func (s *Service) Answer(ctx context.Context, q Question, emit func(Event) error
 	// every token has already streamed to the reader — this can only delay
 	// the final citations/done event, never time-to-first-token or the
 	// visible answer.
-	unverified := s.checkCitations(ctx, answer.String(), cited)
+	unverified := s.checkCitations(ctx, text, cited)
 
 	timings.Total = time.Since(start).Milliseconds()
 	// The model said the provisions do not settle the question. That is a
