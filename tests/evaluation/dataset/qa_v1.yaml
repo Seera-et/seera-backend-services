@@ -43,7 +43,7 @@ cases:
   - id: qa-001
     question: "What powers does the Emperor have under the 1931 Constitution?"
     language: en
-    expected_document_titles: ["Constitution of Ethiopia (1931)"]
+    expected_document_titles: ["The 1931 Constitution of Ethiopia"]
     expected_article_nos: ["5", "6", "9", "11", "16", "17"]
     should_abstain: false
     note: >
@@ -54,14 +54,14 @@ cases:
   - id: qa-002
     question: "What does Article 16 of the 1931 Constitution say?"
     language: en
-    expected_document_titles: ["Constitution of Ethiopia (1931)"]
+    expected_document_titles: ["The 1931 Constitution of Ethiopia"]
     expected_article_nos: ["16"]
     should_abstain: false
     note: "An exact-article query for this put Article 16 at rank 1 in the same verified run."
   - id: qa-003
     question: "አንቀጽ 16 ምን ይላል?"
     language: am
-    expected_document_titles: ["Constitution of Ethiopia (1931)"]
+    expected_document_titles: ["The 1931 Constitution of Ethiopia"]
     expected_article_nos: ["16"]
     should_abstain: false
     note: "Amharic: what does Article 16 say? Same verified article as qa-002, same phrasing pattern already used in routing_v1.yaml's legal-008."
@@ -70,58 +70,58 @@ cases:
   - id: qa-004
     question: "What are the requirements for forming a private limited company in Ethiopia?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
     note: "Document-only ground truth — fill in the article number(s) after a real run."
   - id: qa-005
     question: "What is the minimum capital required to form a share company?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-006
     question: "Can a foreign national own shares in an Ethiopian company?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-007
     question: "What must be included in a company's memorandum of association?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-008
     question: "How is a general partnership formed?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-009
     question: "What happens if a company does not file its annual accounts?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-010
     question: "What are the requirements for issuing a bill of exchange?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-011
     question: "How is a share company dissolved?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-012
     question: "What are the duties of a company's board of directors?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-013
     question: "What is required to register a business name?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-014
     question: "የንግድ ማኅበር እንዴት ይቋቋማል?"
     language: am
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
     note: "Amharic: how is a business association formed? Same phrasing already used in routing_v1.yaml's legal-007."
 
@@ -129,52 +129,52 @@ cases:
   - id: qa-018
     question: "What are the duties of a company's auditor?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-019
     question: "What happens to a general partnership when one of the partners dies?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-020
     question: "How is a joint venture different from other business organizations?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-021
     question: "What rights do minority shareholders have in a share company?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-022
     question: "How is the general meeting of a share company convened?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-023
     question: "What is required to transfer shares in a private limited company?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-024
     question: "What are the requirements for issuing a promissory note?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-025
     question: "What are the requirements for issuing a cheque?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-026
     question: "What happens when one business organization merges with another?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
   - id: qa-027
     question: "What is required for the lease of business premises?"
     language: en
-    expected_document_titles: ["Commercial Code of Ethiopia"]
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
 
   # ---- Out of corpus (should abstain) ---------------------------------------

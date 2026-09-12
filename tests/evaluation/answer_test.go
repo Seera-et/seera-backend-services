@@ -181,6 +181,10 @@ func TestRetrievalQuality(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dataset: %v", err)
 	}
+	// isRelevant requires a title match before it will call anything relevant,
+	// so a stale expected title does not merely skew these metrics — it drives
+	// every one of them to zero while looking like a retrieval failure.
+	assertExpectedTitlesExist(t, db, dataset)
 
 	var (
 		total                             int
@@ -362,6 +366,7 @@ func TestAnswerQuality(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dataset: %v", err)
 	}
+	assertExpectedTitlesExist(t, db, dataset)
 
 	var (
 		results                            []answerResult
@@ -505,4 +510,71 @@ func percentile(sorted []int64, p float64) int64 {
 	}
 	idx := int(p * float64(len(sorted)-1))
 	return sorted[idx]
+}
+
+// assertExpectedTitlesExist fails when a case expects a document title that no
+// document in the corpus has.
+//
+// This exists because the failure it catches is silent. TitleMatched is scored
+// by comparing a citation's DocumentTitle against the dataset's expected title;
+// a title that matches nothing simply never sets the flag, and the metric reads
+// as "retrieval found the wrong document" rather than "this annotation is
+// stale". Checked 2026-09-03: all 24 annotated cases expected "Commercial Code
+// of Ethiopia" and "Constitution of Ethiopia (1931)" while the corpus held
+// "Commercial Code of Ethiopia (Proclamation No. 1243/2021)" and "The 1931
+// Constitution of Ethiopia", so title matching had been 0/28 since the dataset
+// was written and nothing said so. qa_v1.yaml's own header had warned that the
+// titles were transcribed from a plan document rather than a live row.
+//
+// Deliberately exact, matching the comparison it guards, and deliberately
+// fatal. Ground truth that quietly measures nothing is worse than a failing
+// test: it produces a number that looks like a result.
+func assertExpectedTitlesExist(t *testing.T, db *database.Pool, dataset answerDataset) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rows, err := db.Query(ctx, `SELECT title FROM legal_documents`)
+	if err != nil {
+		t.Fatalf("read document titles: %v", err)
+	}
+	defer rows.Close()
+
+	corpus := map[string]bool{}
+	var known []string
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			t.Fatalf("scan document title: %v", err)
+		}
+		corpus[strings.ToLower(title)] = true
+		known = append(known, title)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read document titles: %v", err)
+	}
+	if len(known) == 0 {
+		t.Fatal("the corpus has no documents; ingest before evaluating")
+	}
+
+	stale := map[string][]string{}
+	for _, tc := range dataset.Cases {
+		for _, want := range tc.ExpectedDocumentTitles {
+			if !corpus[strings.ToLower(want)] {
+				stale[want] = append(stale[want], tc.ID)
+			}
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+
+	sort.Strings(known)
+	for want, ids := range stale {
+		t.Errorf("no document titled %q is in the corpus, so %d case(s) can never match it: %s",
+			want, len(ids), strings.Join(ids, ", "))
+	}
+	t.Fatalf("stale ground truth: correct qa_v1.yaml against the titles actually present:\n  %s",
+		strings.Join(known, "\n  "))
 }
