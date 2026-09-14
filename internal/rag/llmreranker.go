@@ -123,6 +123,25 @@ func (r *LLMReranker) Rerank(ctx context.Context, query string, results []search
 	return scored, nil
 }
 
+// maxCandidateRunes bounds how much of each provision the reranker reads.
+//
+// This call sits inside the time-to-first-token budget, and its prompt is the
+// only part of that budget whose size depends on which articles retrieval
+// happened to return. Measured against the live corpus: chunks average 607
+// characters but reach 1,490 at p95 and 3,741 at the maximum, so 20 candidates
+// swing between roughly 3k and 7.5k tokens — and TTFT swung with it, p50 3.1s
+// against a 3s target.
+//
+// 600 keeps the article header and the opening of the provision, which is
+// where a legal chunk states what it governs. It is not a quality compromise
+// invented here: a cross-encoder truncates long documents natively, so this
+// makes the LLM reranker judge on roughly what Cohere's rerank-v3.5 would see
+// rather than on strictly more.
+//
+// Only the reranker excerpts. The generator still receives every chunk in
+// full — truncating evidence would be a different and much worse change.
+const maxCandidateRunes = 600
+
 // buildRerankPrompt reuses rerankDocument (rag/reranker.go) so the LLM judges
 // the same contextualised text Cohere would — title and article header, not a
 // bare span a cross-encoder or an LLM would find equally ambiguous.
@@ -132,9 +151,23 @@ func buildRerankPrompt(query string, candidates []search.Result) string {
 	b.WriteString(query)
 	b.WriteString("\n\nCandidates:\n")
 	for i, c := range candidates {
-		fmt.Fprintf(&b, "\n%d.\n%s\n", i+1, rerankDocument(c))
+		fmt.Fprintf(&b, "\n%d.\n%s\n", i+1, rerankExcerpt(c))
 	}
 	return b.String()
+}
+
+// rerankExcerpt renders a candidate with its text bounded.
+//
+// Takes search.Result by value, so shortening Text here cannot reach the copy
+// the generator and the citations are built from.
+//
+// Reuses history.go's truncateRunes, which counts runes rather than bytes —
+// half the corpus is Amharic, where every character is three bytes, so a
+// byte-wise cut would truncate Ethiopic text at a third of the intended length
+// and could split a character in half.
+func rerankExcerpt(r search.Result) string {
+	r.Text = truncateRunes(r.Text, maxCandidateRunes)
+	return rerankDocument(r)
 }
 
 func parseRerankScores(raw string, want int) ([]float64, error) {

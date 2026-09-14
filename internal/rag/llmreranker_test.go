@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Seera-et/seera-backend-services/internal/legal"
 	"github.com/Seera-et/seera-backend-services/internal/search"
@@ -130,5 +131,115 @@ func TestLLMRerankerName(t *testing.T) {
 	llm := &stubLLM{}
 	if got := NewLLMReranker(llm).Name(); !strings.HasPrefix(got, "llm:") {
 		t.Errorf("Name() = %q, want an \"llm:\" prefix", got)
+	}
+}
+
+// The reranker's prompt is the only part of the time-to-first-token budget
+// whose size depends on which articles retrieval happened to return. Bounding
+// each candidate is what makes that budget predictable — measured against the
+// live corpus, chunks reach 1,490 characters at p95 and 3,741 at the maximum.
+func TestRerankExcerptBoundsLongProvisions(t *testing.T) {
+	long := strings.Repeat("a provision about company formation ", 200) // ~7200 chars
+
+	got := rerankExcerpt(search.Result{
+		DocumentTitle: "Commercial Code",
+		ArticleNo:     "265",
+		ArticleTitle:  "Registration",
+		Text:          long,
+	})
+
+	if len([]rune(got)) > maxCandidateRunes+200 {
+		t.Errorf("excerpt is %d runes, want the text bounded near %d",
+			len([]rune(got)), maxCandidateRunes)
+	}
+	// The header is what makes a bare span judgeable, so it must survive.
+	if !strings.Contains(got, "Commercial Code") || !strings.Contains(got, "265") {
+		t.Errorf("excerpt dropped the article header:\n%s", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Error("a truncated excerpt should show that it was cut")
+	}
+}
+
+func TestRerankExcerptLeavesShortProvisionsWhole(t *testing.T) {
+	text := "The capital of a private limited company may not be less than fifteen thousand Birr."
+
+	got := rerankExcerpt(search.Result{DocumentTitle: "Commercial Code", ArticleNo: "496", Text: text})
+
+	if !strings.Contains(got, text) {
+		t.Errorf("a short provision was altered:\n%s", got)
+	}
+	if strings.Contains(got, "…") {
+		t.Error("a short provision should not be marked as truncated")
+	}
+}
+
+// Amharic is three bytes per character. A byte-wise bound would cut Ethiopic
+// text at a third of the intended length and could split a character.
+func TestRerankExcerptCountsAmharicByCharacter(t *testing.T) {
+	amharic := strings.Repeat("የንግድ ማህበር ምዝገባ ", 200)
+
+	got := rerankExcerpt(search.Result{DocumentTitle: "የንግድ ሕግ", ArticleNo: "265", Text: amharic})
+
+	runes := len([]rune(got))
+	if runes < maxCandidateRunes/2 {
+		t.Errorf("Amharic excerpt is only %d runes — bounded by bytes, not characters", runes)
+	}
+	if !utf8.ValidString(got) {
+		t.Error("excerpt split a multi-byte character")
+	}
+}
+
+// The generator and the citations must still see the whole provision: this
+// bounds what the reranker reads, never what the answer is built from.
+func TestRerankExcerptDoesNotMutateTheResult(t *testing.T) {
+	full := strings.Repeat("x", 3000)
+	result := search.Result{DocumentTitle: "Commercial Code", ArticleNo: "265", Text: full}
+
+	_ = rerankExcerpt(result)
+
+	if result.Text != full {
+		t.Error("rerankExcerpt shortened the caller's result; the generator would lose evidence")
+	}
+}
+
+// Quantifies what the bound buys, using the live corpus's measured shape
+// (2026-09-03: 879 chunks, mean 607 characters, p95 1,490, max 3,741).
+//
+// The point is not the exact ratio but that the prompt stops depending on
+// which articles retrieval happened to return: before, a question that pulled
+// twenty long provisions cost roughly twice one that pulled twenty average
+// ones, and time-to-first-token moved with it.
+func TestRerankPromptSizeIsBoundedRegardlessOfCorpus(t *testing.T) {
+	build := func(chars int) int {
+		candidates := make([]search.Result, llmRerankMaxCandidates)
+		for i := range candidates {
+			candidates[i] = search.Result{
+				DocumentTitle: "Commercial Code of Ethiopia",
+				ArticleNo:     "265",
+				ArticleTitle:  "Registration of the Company",
+				Text:          strings.Repeat("x", chars),
+			}
+		}
+		return len([]rune(buildRerankPrompt("How do I register a company?", candidates)))
+	}
+
+	average := build(607)
+	p95 := build(1490)
+	worst := build(3741)
+
+	t.Logf("rerank prompt runes — average chunk: %d, p95: %d, largest: %d", average, p95, worst)
+
+	// Every bucket lands on the same bounded size, so the worst case is the
+	// normal case rather than five times it.
+	if worst != p95 || p95 != average {
+		t.Errorf("prompt size still varies with chunk length: avg=%d p95=%d worst=%d",
+			average, p95, worst)
+	}
+
+	// Sanity bound: twenty candidates at 600 runes plus headers and the
+	// question. Unbounded, the largest case alone would have been ~75,000.
+	if ceiling := llmRerankMaxCandidates * (maxCandidateRunes + 200); worst > ceiling {
+		t.Errorf("bounded prompt is %d runes, want at most %d", worst, ceiling)
 	}
 }
