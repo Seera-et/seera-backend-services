@@ -186,19 +186,52 @@ func TestRetrievalQuality(t *testing.T) {
 	// every one of them to zero while looking like a retrieval failure.
 	assertExpectedTitlesExist(t, db, dataset)
 
-	var (
-		total                             int
-		fusedRecallHits, rerankRecallHits int
-		precisionSum                      float64
-		reciprocalRankSum                 float64
-		hit1, hit3                        int
-	)
+	// Overall plus one bucket per language. The plan's exit gate sets different
+	// targets for each (Precision@5 >= 0.80 overall, >= 0.65 Amharic), because
+	// the risk it guards against is precisely that English carries the average
+	// while Amharic retrieval quietly fails — which a single blended number
+	// cannot show. Amharic retrieval is the documented reason the embedder-swap
+	// path in §2.1 exists at all.
+	overall := &retrievalTally{}
+	byLanguage := map[string]*retrievalTally{}
+
+	// Split by how specific the ground truth is, which matters more than it
+	// sounds. isRelevant can only check a document title when a case carries no
+	// expected article numbers, and the live corpus is 824 Commercial Code
+	// chunks out of 879 (measured 2026-09-03) — 94% one document. So a
+	// document-level case scores near-perfect Precision@5 whatever retrieval
+	// does, and a blended P@5 reports corpus concentration rather than
+	// retrieval quality. Only the article-level bucket is evidence.
+	byGranularity := map[string]*retrievalTally{}
+
+	var cases []retrievalCase
 
 	for _, tc := range dataset.Cases {
 		if tc.ShouldAbstain {
 			continue // nothing should be relevant; retrieval quality is not the question here.
 		}
-		total++
+
+		language := tc.Language
+		if language == "" {
+			language = "unspecified"
+		}
+		if byLanguage[language] == nil {
+			byLanguage[language] = &retrievalTally{}
+		}
+		perLanguage := byLanguage[language]
+
+		granularity := "document-level"
+		if len(tc.ExpectedArticleNos) > 0 {
+			granularity = "article-level"
+		}
+		if byGranularity[granularity] == nil {
+			byGranularity[granularity] = &retrievalTally{}
+		}
+		perGranularity := byGranularity[granularity]
+
+		overall.total++
+		perLanguage.total++
+		perGranularity.total++
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		fused, err := searchSvc.Search(ctx, search.Query{Text: tc.Question, Limit: 50})
@@ -208,8 +241,15 @@ func TestRetrievalQuality(t *testing.T) {
 			continue
 		}
 
+		result := retrievalCase{ID: tc.ID, Question: tc.Question, Language: language}
+
+		result.Granularity = granularity
+
 		if anyRelevant(fused, tc) {
-			fusedRecallHits++
+			overall.fusedRecallHits++
+			perLanguage.fusedRecallHits++
+			perGranularity.fusedRecallHits++
+			result.FoundInFused = true
 		}
 
 		rerankCtx, rerankCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -223,16 +263,26 @@ func TestRetrievalQuality(t *testing.T) {
 			}
 		}
 		if anyRelevant(reranked, tc) {
-			rerankRecallHits++
+			overall.rerankRecallHits++
+			perLanguage.rerankRecallHits++
+			perGranularity.rerankRecallHits++
+			result.FoundInTop10 = true
 		}
 
 		if rank := firstRelevantRank(reranked, tc); rank > 0 {
-			reciprocalRankSum += 1.0 / float64(rank)
+			overall.reciprocalRankSum += 1.0 / float64(rank)
+			perLanguage.reciprocalRankSum += 1.0 / float64(rank)
+			perGranularity.reciprocalRankSum += 1.0 / float64(rank)
+			result.FirstRelevantRank = rank
 			if rank == 1 {
-				hit1++
+				overall.hit1++
+				perLanguage.hit1++
+				perGranularity.hit1++
 			}
 			if rank <= 3 {
-				hit3++
+				overall.hit3++
+				perLanguage.hit3++
+				perGranularity.hit3++
 			}
 		}
 
@@ -247,31 +297,195 @@ func TestRetrievalQuality(t *testing.T) {
 			}
 		}
 		if len(five) > 0 {
-			precisionSum += float64(relevant) / float64(len(five))
+			p := float64(relevant) / float64(len(five))
+			overall.precisionSum += p
+			perLanguage.precisionSum += p
+			perGranularity.precisionSum += p
+			result.PrecisionAt5 = p
 		}
+
+		cases = append(cases, result)
 	}
 
-	if total == 0 {
+	if overall.total == 0 {
 		t.Fatal("no non-abstain cases in the dataset — nothing to measure")
 	}
 
-	recallAt50 := float64(fusedRecallHits) / float64(total)
-	recallAt10 := float64(rerankRecallHits) / float64(total)
-	precisionAt5 := precisionSum / float64(total)
-	mrr := reciprocalRankSum / float64(total)
-	hitAt1 := float64(hit1) / float64(total)
-	hitAt3 := float64(hit3) / float64(total)
+	// The printed table docs/QA_FEATURE_PLAN.md §8 asks for, so a run is
+	// readable without opening the JSON.
+	languages := make([]string, 0, len(byLanguage))
+	for language := range byLanguage {
+		languages = append(languages, language)
+	}
+	sort.Strings(languages)
 
-	t.Logf("retrieval quality over %d cases: Recall@50(fused)=%.0f%%, Recall@10(reranked)=%.0f%%, Precision@5=%.0f%%, MRR=%.2f, Hit@1=%.0f%%, Hit@3=%.0f%%",
-		total, recallAt50*100, recallAt10*100, precisionAt5*100, mrr, hitAt1*100, hitAt3*100)
+	t.Logf("%-12s %5s %10s %10s %10s %6s %6s %6s", "bucket", "n", "R@50", "R@10", "P@5", "MRR", "H@1", "H@3")
+	t.Logf("%s", strings.Repeat("-", 72))
+	logTally(t, "overall", overall)
+	for _, language := range languages {
+		logTally(t, language, byLanguage[language])
+	}
+	for _, granularity := range []string{"article-level", "document-level"} {
+		if bucket := byGranularity[granularity]; bucket != nil {
+			logTally(t, granularity, bucket)
+		}
+	}
+
+	report := retrievalReport{
+		Overall: overall.metrics("overall"),
+		Cases:   cases,
+	}
+	for _, language := range languages {
+		report.ByLanguage = append(report.ByLanguage, byLanguage[language].metrics(language))
+	}
+	for _, granularity := range []string{"article-level", "document-level"} {
+		if bucket := byGranularity[granularity]; bucket != nil {
+			report.ByGranularity = append(report.ByGranularity, bucket.metrics(granularity))
+		}
+	}
+	writeReport(t, "retrieval", report)
+
+	// The headline number is not trustworthy while most cases are
+	// document-level, and this says so rather than letting a passing P@5 be
+	// read as evidence retrieval works. On a corpus that is 94% one document,
+	// a document-level case scores near 1.0 no matter what retrieval returns.
+	articleLevel := byGranularity["article-level"]
+	documentLevel := byGranularity["document-level"]
+	if documentLevel != nil && documentLevel.total > 0 {
+		share := float64(documentLevel.total) / float64(overall.total) * 100
+		t.Logf("WARNING: %.0f%% of cases (%d/%d) carry document-level ground truth only. "+
+			"Their Precision@5 measures how concentrated the corpus is, not how good retrieval is — "+
+			"any chunk from the right document counts as a hit. Read the article-level bucket instead, "+
+			"and fill in expected_article_nos as answers are verified against a real run.",
+			share, documentLevel.total, overall.total)
+	}
+	if articleLevel == nil || articleLevel.total < 10 {
+		n := 0
+		if articleLevel != nil {
+			n = articleLevel.total
+		}
+		t.Logf("WARNING: only %d case(s) have article-level ground truth, so the plan's "+
+			"Precision@5 >= 0.80 gate is not yet meaningfully measurable.", n)
+	}
 
 	// A wide margin, deliberately: this dataset is small and its ground truth
 	// is mostly document-level (see dataset.go), so this is a regression
-	// alarm — "retrieval broke" — not a precision target to chase.
-	if recallAt50 < 0.5 {
+	// alarm — "retrieval broke" — not a precision target to chase. The plan's
+	// real gate (P@5 >= 0.80 overall, >= 0.65 Amharic) is reported above and
+	// watched against the committed baseline rather than enforced here, for
+	// the same reason TestAnswerQuality gates only on abstention: a strict
+	// threshold on 24 mostly document-level cases would be measuring the
+	// dataset's completeness, not retrieval's quality.
+	if overall.recallAt50() < 0.5 {
 		t.Errorf("Recall@50 %.0f%%, want at least 50%% — retrieval is not finding the right document at all",
-			recallAt50*100)
+			overall.recallAt50()*100)
 	}
+
+	// Amharic is the documented risk (§2.1, §10): the corpus is half Amharic by
+	// intent, and a blended average hides an Amharic collapse behind English
+	// results. Reported as its own line so the gate is visible even while the
+	// bucket is too small to enforce.
+	if am := byLanguage["am"]; am == nil || am.total == 0 {
+		t.Logf("WARNING: no Amharic cases ran, so the Amharic P@5 >= 0.65 gate is unmeasured. " +
+			"The corpus currently holds no Amharic chunks; see docs/CORPUS.md.")
+	} else if am.total < 5 {
+		t.Logf("WARNING: only %d Amharic case(s); P@5=%.0f%% is not a meaningful measurement against the 65%% gate",
+			am.total, am.precisionAt5()*100)
+	}
+}
+
+// retrievalTally accumulates one bucket's counters — overall, or one language.
+type retrievalTally struct {
+	total                             int
+	fusedRecallHits, rerankRecallHits int
+	precisionSum                      float64
+	reciprocalRankSum                 float64
+	hit1, hit3                        int
+}
+
+func (r *retrievalTally) recallAt50() float64 {
+	return ratio(r.fusedRecallHits, r.total)
+}
+func (r *retrievalTally) recallAt10() float64 {
+	return ratio(r.rerankRecallHits, r.total)
+}
+func (r *retrievalTally) precisionAt5() float64 { return mean(r.precisionSum, r.total) }
+func (r *retrievalTally) mrr() float64          { return mean(r.reciprocalRankSum, r.total) }
+func (r *retrievalTally) hitAt1() float64       { return ratio(r.hit1, r.total) }
+func (r *retrievalTally) hitAt3() float64       { return ratio(r.hit3, r.total) }
+
+func ratio(hits, total int) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(hits) / float64(total)
+}
+
+func mean(sum float64, total int) float64 {
+	if total == 0 {
+		return 0
+	}
+	return sum / float64(total)
+}
+
+func (r *retrievalTally) metrics(bucket string) retrievalMetrics {
+	return retrievalMetrics{
+		Bucket:       bucket,
+		Cases:        r.total,
+		RecallAt50:   r.recallAt50(),
+		RecallAt10:   r.recallAt10(),
+		PrecisionAt5: r.precisionAt5(),
+		MRR:          r.mrr(),
+		HitAt1:       r.hitAt1(),
+		HitAt3:       r.hitAt3(),
+	}
+}
+
+func logTally(t *testing.T, bucket string, r *retrievalTally) {
+	t.Helper()
+	t.Logf("%-12s %5d %9.0f%% %9.0f%% %9.0f%% %6.2f %5.0f%% %5.0f%%",
+		bucket, r.total,
+		r.recallAt50()*100, r.recallAt10()*100, r.precisionAt5()*100,
+		r.mrr(), r.hitAt1()*100, r.hitAt3()*100)
+}
+
+// retrievalMetrics is one bucket's scores, as written to the run report.
+type retrievalMetrics struct {
+	Bucket       string  `json:"bucket"`
+	Cases        int     `json:"cases"`
+	RecallAt50   float64 `json:"recall_at_50"`
+	RecallAt10   float64 `json:"recall_at_10"`
+	PrecisionAt5 float64 `json:"precision_at_5"`
+	MRR          float64 `json:"mrr"`
+	HitAt1       float64 `json:"hit_at_1"`
+	HitAt3       float64 `json:"hit_at_3"`
+}
+
+// retrievalCase is one question's outcome, kept per-case so a regression can be
+// traced to the questions that moved rather than only to an average that fell.
+type retrievalCase struct {
+	ID                string  `json:"id"`
+	Question          string  `json:"question"`
+	Language          string  `json:"language"`
+	Granularity       string  `json:"granularity"`
+	FoundInFused      bool    `json:"found_in_fused"`
+	FoundInTop10      bool    `json:"found_in_top10"`
+	FirstRelevantRank int     `json:"first_relevant_rank"`
+	PrecisionAt5      float64 `json:"precision_at_5"`
+}
+
+// retrievalReport is what lands in results/retrieval_latest.json. Committed, so
+// a change to chunking, fusion or reranking is measured against a baseline
+// rather than argued about — docs/QA_FEATURE_PLAN.md §8.
+type retrievalReport struct {
+	Overall    retrievalMetrics   `json:"overall"`
+	ByLanguage []retrievalMetrics `json:"by_language"`
+	// ByGranularity separates cases with article-level ground truth from those
+	// checked only by document title. On a corpus dominated by one document the
+	// latter cannot measure precision, so the two must never be blended into a
+	// single headline number.
+	ByGranularity []retrievalMetrics `json:"by_granularity"`
+	Cases         []retrievalCase    `json:"cases"`
 }
 
 func anyRelevant(results []search.Result, tc answerCase) bool {
@@ -320,6 +534,7 @@ func TestFirstRelevantRank(t *testing.T) {
 type answerResult struct {
 	ID              string `json:"id"`
 	Question        string `json:"question"`
+	Language        string `json:"language,omitempty"`
 	ShouldAbstain   bool   `json:"should_abstain"`
 	Kind            string `json:"kind"`
 	Grounded        bool   `json:"grounded"`
@@ -407,6 +622,7 @@ func TestAnswerQuality(t *testing.T) {
 		res := answerResult{
 			ID:            tc.ID,
 			Question:      tc.Question,
+			Language:      tc.Language,
 			ShouldAbstain: tc.ShouldAbstain,
 			Kind:          string(final.Kind),
 			Grounded:      final.Grounded,

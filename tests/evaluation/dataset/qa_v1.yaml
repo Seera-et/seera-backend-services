@@ -22,9 +22,14 @@
 #     legal_documents`) — the titles below are written from the document
 #     descriptions in QA_FEATURE_PLAN.md's ingestion log, not copied from a
 #     live row, and may need correcting.
-#   - `expected_article_nos` is filled in for exactly the two cases verified
-#     against a real run (QA_FEATURE_PLAN.md "First real run", 2026-08-17,
-#     against Neon). Every other non-abstain case names a document only —
+#   - `expected_article_nos` is filled in only for cases verified against a
+#     real run — three from QA_FEATURE_PLAN.md's "First real run" (2026-08-17,
+#     against Neon) and six more from live runs on 2026-09-03, where each
+#     cited article's own title confirmed the match. Every other non-abstain
+#     case names a document only, and that distinction is now reported: see
+#     the by_granularity block in results/retrieval_latest.json. A
+#     document-level case cannot measure Precision@5 on a corpus that is 94%
+#     one document — any chunk from the Commercial Code counts as a hit —
 #     real, answerable questions about topics a Commercial Code covers
 #     (formation, shares, partnerships, negotiable instruments, dissolution,
 #     governance, registration), deliberately avoiding topics like employment
@@ -71,6 +76,7 @@ cases:
     question: "What are the requirements for forming a private limited company in Ethiopia?"
     language: en
     expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
+    expected_article_nos: ["495", "496", "499", "500", "501"]
     should_abstain: false
     note: "Document-only ground truth — fill in the article number(s) after a real run."
   - id: qa-005
@@ -87,6 +93,7 @@ cases:
     question: "What must be included in a company's memorandum of association?"
     language: en
     expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
+    expected_article_nos: ["500"]
     should_abstain: false
   - id: qa-008
     question: "How is a general partnership formed?"
@@ -171,6 +178,51 @@ cases:
     language: en
     expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
     should_abstain: false
+  # ---- Verified against real runs, 2026-09-03 -----------------------------
+  #
+  # Article numbers below were read off answers this corpus actually produced,
+  # with each cited article's own title confirming the match (e.g. 499 is
+  # "General Conditions Necessary for Formation"). This is the workflow the
+  # header describes: run the question, see what came back, record it.
+  - id: qa-029
+    question: "How do I register a company in Ethiopia?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
+    expected_article_nos: ["82", "254", "261", "265"]
+    should_abstain: false
+    note: >
+      265 "Registration of the Company in the Commercial Register", 261
+      "Auditing Formation Procedure", 254 "General Requirements in Respect of
+      Formation", 82 "Persons to be Registered". A broad question that should
+      pull several provisions, so it also exercises depth=analyse.
+  - id: qa-030
+    question: "What is the difference between a share company, a private limited company and a one member private limited company?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
+    expected_article_nos: ["245", "495", "534"]
+    should_abstain: false
+    note: >
+      The three "Definition" articles, one per entity type. A comparison
+      question: retrieval has to find all three, not just the best one.
+  - id: qa-031
+    question: "What is the minimum capital required to form a private limited company?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
+    expected_article_nos: ["496"]
+    should_abstain: false
+    note: >
+      Article 496 "Capital" — fifteen thousand Birr minimum, hundred Birr par
+      value. A single-provision question with an exact numeric answer, so a
+      wrong retrieval is unambiguous rather than arguable.
+  - id: qa-032
+    question: "How is a one member private limited company incorporated?"
+    language: en
+    expected_document_titles: ["Commercial Code of Ethiopia (Proclamation No. 1243/2021)"]
+    expected_article_nos: ["534", "536"]
+    should_abstain: false
+    note: >
+      534 "Definition" and 536 "Unilateral Declaration: Content and Form".
+
   - id: qa-027
     question: "What is required for the lease of business premises?"
     language: en
