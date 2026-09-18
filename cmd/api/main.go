@@ -135,12 +135,22 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 	tracer := tracing.NewRepository(db.Pool, log)
 	handlers.Traces = tracer.Handler(log)
 
-	// The catalogue is the same: reads over published versions, no provider
-	// involved, so browsing works on a database with a corpus and no API keys.
-	documentsHandler := documents.NewHandler(
-		documents.NewService(documents.NewRepository(db.Pool)), log)
+	// The catalogue reads over published versions and needs no provider, so
+	// browsing and keyword search work on a database with a corpus and no API
+	// keys at all. The embedder is passed when there is one and only adds the
+	// semantic search arm: with it, a hybrid search fuses lexical and vector
+	// results; without it, the same request is served as keyword-only and says
+	// so in the response, rather than failing.
+	documentsRepo, err := documents.NewRepository(db.Pool, documents.WithEmbedder(embedder))
+	if err != nil {
+		return server.Handlers{}, err
+	}
+	documentsHandler := documents.NewHandler(documents.NewService(documentsRepo), log)
 	handlers.Documents = documentsHandler.Routes()
 	handlers.CorpusStats = documentsHandler.Stats()
+	if embedder == nil {
+		log.Warn("corpus search limited to keyword matching: no embedding provider configured")
+	}
 
 	// Q&A needs retrieval (an embedder) and generation (an LLM). Either missing
 	// leaves the route unregistered rather than serving something that fails on

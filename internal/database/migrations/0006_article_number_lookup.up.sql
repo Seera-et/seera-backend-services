@@ -1,0 +1,19 @@
+-- Index for looking a provision up by its number alone.
+--
+-- Two callers do this, and neither can use articles_version_article_no_idx:
+-- that index leads on version_id, and both of these search across every
+-- published version at once.
+--
+--   * the answer path's exact-article arm (internal/search, articleLookup),
+--     which fires whenever a question names a provision — "what does Article 45
+--     require" — and has been doing a sequential scan since it was written;
+--   * the Explorer's article arm (internal/documents, articleArm), which is how
+--     a reader typing "45" or "Article 45" into the search box gets Article 45
+--     at rank 1 instead of every provision that mentions the number.
+--
+-- Both are `WHERE article_no = ANY($1)`, so a plain btree on the column is the
+-- right shape. Not CONCURRENTLY: the migration runner applies one migration per
+-- transaction under an advisory lock, and CREATE INDEX CONCURRENTLY cannot run
+-- inside a transaction. At this corpus size the exclusive lock is momentary; a
+-- corpus where it is not has outgrown a forward-only embedded runner anyway.
+CREATE INDEX articles_article_no_idx ON articles (article_no);

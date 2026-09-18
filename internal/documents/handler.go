@@ -19,6 +19,7 @@ type Catalogue interface {
 	List(ctx context.Context, f ListFilter) (ListResult, error)
 	Get(ctx context.Context, id legal.DocumentID) (Detail, error)
 	Articles(ctx context.Context, documentID legal.DocumentID, f ArticleFilter) (ArticlePage, error)
+	Search(ctx context.Context, f SearchFilter) (SearchResult, error)
 	Stats(ctx context.Context) (Stats, error)
 }
 
@@ -35,11 +36,18 @@ func NewHandler(catalogue Catalogue, log *slog.Logger) *Handler {
 // Routes mounts the document endpoints on their own subrouter.
 //
 //	GET /api/v1/documents
+//	GET /api/v1/documents/search
 //	GET /api/v1/documents/{id}
 //	GET /api/v1/documents/{id}/articles
+//
+// "search" is registered before "{id}" so it is matched as a literal rather
+// than swallowed as a document id. chi prefers static segments over params
+// regardless of registration order, but relying on that silently would make
+// the next person read chi's radix tree to know whether this works.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", h.list)
+	r.Get("/search", h.search)
 	r.Get("/{id}", h.get)
 	r.Get("/{id}/articles", h.articles)
 	return r
@@ -72,6 +80,34 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.write(w, r, http.StatusOK, result, "public, max-age=60")
+}
+
+// search serves GET /api/v1/documents/search.
+//
+// Not cached. A relevance ranking is a function of the query, and the corpus
+// changes only on ingestion, so a shared cache would be safe — but the result
+// also depends on whether an embedding provider answered, and serving a
+// keyword-only ranking from cache to a request that could have had the semantic
+// arm would be a silent downgrade.
+func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
+	filter, err := ParseSearchFilter(r.URL.Query())
+	if err != nil {
+		h.fail(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	result, err := h.catalogue.Search(r.Context(), filter)
+	switch {
+	case err == nil:
+	case isInvalidIdentifier(err):
+		h.fail(w, r, http.StatusBadRequest, "invalid_request", "That is not a valid document id.")
+		return
+	default:
+		h.internal(w, r, "search corpus", err, "Could not search the corpus.")
+		return
+	}
+
+	h.write(w, r, http.StatusOK, result, "")
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {

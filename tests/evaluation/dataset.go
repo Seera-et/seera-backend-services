@@ -243,3 +243,89 @@ func LoadEdgeCaseDataset() (edgeCaseDataset, error) {
 
 	return dataset, nil
 }
+
+// explorerCase is one Knowledge Explorer search and what must come back.
+type explorerCase struct {
+	ID    string `yaml:"id"`
+	Query string `yaml:"query"`
+	Note  string `yaml:"note"`
+
+	// ExpectArticles is satisfied by any one of these article numbers. Several
+	// are listed where more than one provision genuinely answers the query, so
+	// the metric measures retrieval rather than the author's preference between
+	// two correct hits.
+	ExpectArticles []string `yaml:"expect_articles"`
+
+	// ExpectDocuments matches on a substring of the document title. Ids are
+	// per-database; a dataset pinned to them runs on one machine only.
+	ExpectDocuments []string `yaml:"expect_documents"`
+
+	// ExpectRank, when set, requires a hit at that rank or better. Only used
+	// where the result is a deterministic lookup rather than a ranking.
+	ExpectRank int `yaml:"expect_rank"`
+
+	// Semantic marks a query phrased without the provision's own vocabulary.
+	// These are expected to fail under keyword-only ranking, which is the
+	// measurement that justifies the semantic arm.
+	Semantic bool `yaml:"semantic"`
+
+	// ExpectEmpty inverts the case: nothing in the corpus answers this, and
+	// returning nothing is the correct result.
+	ExpectEmpty bool `yaml:"expect_empty"`
+
+	// Adjacent marks a real legal question about legislation that is not
+	// ingested. These are not a pass/fail target: their nearest chunks fall
+	// inside the similarity band genuine hits occupy, so no distance threshold
+	// rejects them without also rejecting real results. Reported as a measured
+	// gap instead of asserted, so the number moves if reranking is ever added.
+	Adjacent bool `yaml:"adjacent"`
+}
+
+type explorerDataset struct {
+	Cases []explorerCase `yaml:"cases"`
+}
+
+// LoadExplorerDataset reads and validates the Explorer search cases.
+func LoadExplorerDataset() (explorerDataset, error) {
+	raw, err := os.ReadFile(filepath.Join("dataset", "explorer_v1.yaml"))
+	if err != nil {
+		return explorerDataset{}, fmt.Errorf("read dataset: %w", err)
+	}
+
+	var dataset explorerDataset
+	if err := yaml.Unmarshal(raw, &dataset); err != nil {
+		return explorerDataset{}, fmt.Errorf("parse dataset: %w", err)
+	}
+	if len(dataset.Cases) == 0 {
+		return explorerDataset{}, fmt.Errorf("dataset is empty")
+	}
+
+	seen := map[string]bool{}
+	for _, tc := range dataset.Cases {
+		switch {
+		case tc.ID == "":
+			return explorerDataset{}, fmt.Errorf("a case is missing its id")
+		case tc.Query == "":
+			return explorerDataset{}, fmt.Errorf("case %q has no query", tc.ID)
+		case seen[tc.ID]:
+			return explorerDataset{}, fmt.Errorf("duplicate case id %q", tc.ID)
+		case tc.ExpectEmpty && len(tc.ExpectArticles) > 0:
+			return explorerDataset{}, fmt.Errorf(
+				"case %q expects no results and also expects articles", tc.ID)
+		case tc.Adjacent && (tc.ExpectEmpty || len(tc.ExpectArticles) > 0):
+			return explorerDataset{}, fmt.Errorf(
+				"case %q is an adjacent-topic probe and cannot also assert an outcome", tc.ID)
+		case !tc.ExpectEmpty && !tc.Adjacent && len(tc.ExpectArticles) == 0:
+			return explorerDataset{}, fmt.Errorf(
+				"case %q expects results but names no article; it would pass on anything", tc.ID)
+		case tc.ExpectRank < 0:
+			return explorerDataset{}, fmt.Errorf("case %q has a negative expect_rank", tc.ID)
+		case tc.ExpectEmpty && tc.ExpectRank > 0:
+			return explorerDataset{}, fmt.Errorf(
+				"case %q expects no results and also a rank", tc.ID)
+		}
+		seen[tc.ID] = true
+	}
+
+	return dataset, nil
+}

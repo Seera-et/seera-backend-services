@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Seera-et/seera-backend-services/internal/ai"
 	"github.com/Seera-et/seera-backend-services/internal/legal"
 )
 
@@ -21,9 +22,46 @@ var ErrNotFound = errors.New("not found")
 // Repository reads the catalogue from Postgres.
 type Repository struct {
 	pool *pgxpool.Pool
+
+	// embedder and embedTable are set only when semantic search is configured.
+	// Nil means the vector arm does not run and a hybrid search degrades to
+	// lexical, which is the correct behaviour on a deployment with a corpus and
+	// no AI credentials — browsing and keyword search still work.
+	embedder   ai.Embedder
+	embedTable string
 }
 
-func NewRepository(pool *pgxpool.Pool) *Repository { return &Repository{pool: pool} }
+// RepositoryOption configures optional collaborators.
+type RepositoryOption func(*Repository) error
+
+// WithEmbedder enables the semantic search arm.
+//
+// The embedder is resolved to its table here rather than per query, so a model
+// with no table fails at construction instead of on a reader's first search.
+func WithEmbedder(embedder ai.Embedder) RepositoryOption {
+	return func(r *Repository) error {
+		if embedder == nil {
+			return nil
+		}
+		table, err := legal.EmbeddingTable(embedder.Model(), embedder.Dimensions())
+		if err != nil {
+			return err
+		}
+		r.embedder = embedder
+		r.embedTable = table
+		return nil
+	}
+}
+
+func NewRepository(pool *pgxpool.Pool, opts ...RepositoryOption) (*Repository, error) {
+	r := &Repository{pool: pool}
+	for _, opt := range opts {
+		if err := opt(r); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
+}
 
 // visibleVersions is the one place that decides what a reader may see.
 //
@@ -56,11 +94,15 @@ func (r *Repository) List(ctx context.Context, f ListFilter) (ListResult, error)
 		                OR d.issuing_authority ILIKE '%' || $1 || '%')
 		  AND ($2 = '' OR d.language = $2)
 		  AND ($3 = '' OR d.doc_type = $3)
+		  AND ($4 = '' OR d.legal_domain = $4)
+		  AND ($5 = 0  OR extract(year FROM d.publication_date) = $5
+		                OR extract(year FROM d.effective_date) = $5)
 		ORDER BY d.title, d.id
-		LIMIT $4 OFFSET $5`
+		LIMIT $6 OFFSET $7`
 
 	rows, err := r.pool.Query(ctx, query,
-		f.Term, string(f.Language), string(f.DocType), f.Limit, f.Offset)
+		f.Term, string(f.Language), string(f.DocType), f.Domain, f.Year,
+		f.Limit, f.Offset)
 	if err != nil {
 		return ListResult{}, fmt.Errorf("list documents: %w", err)
 	}
@@ -324,6 +366,38 @@ func (r *Repository) Stats(ctx context.Context) (Stats, error) {
 	}
 	if err := typeRows.Err(); err != nil {
 		return Stats{}, fmt.Errorf("corpus types: %w", err)
+	}
+
+	// Domains are the browse categories. Ordered by size because that is the
+	// order a reader scans them in, and documents with no recorded domain are
+	// left out — see Stats.Domains.
+	const byDomainQuery = `
+		SELECT d.legal_domain,
+		       count(DISTINCT d.id),
+		       count(a.id)
+		FROM legal_documents d
+		JOIN document_versions v ON v.document_id = d.id AND v.status = 'published'
+		LEFT JOIN articles a     ON a.version_id = v.id
+		WHERE d.legal_domain <> ''
+		GROUP BY d.legal_domain
+		ORDER BY count(DISTINCT d.id) DESC, d.legal_domain`
+
+	domainRows, err := r.pool.Query(ctx, byDomainQuery)
+	if err != nil {
+		return Stats{}, fmt.Errorf("corpus domains: %w", err)
+	}
+	defer domainRows.Close()
+
+	s.Domains = []DomainStat{}
+	for domainRows.Next() {
+		var stat DomainStat
+		if err := domainRows.Scan(&stat.Domain, &stat.Documents, &stat.Articles); err != nil {
+			return Stats{}, fmt.Errorf("scan domain stat: %w", err)
+		}
+		s.Domains = append(s.Domains, stat)
+	}
+	if err := domainRows.Err(); err != nil {
+		return Stats{}, fmt.Errorf("corpus domains: %w", err)
 	}
 
 	return s, nil

@@ -19,6 +19,16 @@ type fakeStore struct {
 	lastAfter int
 
 	versionErr error
+
+	// Search side. pool is what ranking returns; hydrated is what the store
+	// would load for a page, keyed by article id.
+	pool      Pool
+	hydrated  map[legal.ArticleID]SearchHit
+	poolErr   error
+	lastPage  []ranked
+	lastTerm  string
+	lastNums  []string
+	hydrateHt int
 }
 
 func (f *fakeStore) List(context.Context, ListFilter) (ListResult, error) {
@@ -50,6 +60,29 @@ func (f *fakeStore) Articles(_ context.Context, _ legal.VersionID, after, limit 
 			break
 		}
 		out = append(out, a)
+	}
+	return out, nil
+}
+
+func (f *fakeStore) SearchPool(_ context.Context, filter SearchFilter, numbers []string) (Pool, error) {
+	f.lastTerm, f.lastNums = filter.Term, numbers
+	if f.poolErr != nil {
+		return Pool{}, f.poolErr
+	}
+	return f.pool, nil
+}
+
+func (f *fakeStore) Hydrate(_ context.Context, _ SearchFilter, page []ranked) ([]SearchHit, error) {
+	f.lastPage = page
+	f.hydrateHt++
+
+	out := make([]SearchHit, 0, len(page))
+	for _, p := range page {
+		hit, ok := f.hydrated[p.articleID]
+		if !ok {
+			continue
+		}
+		out = append(out, hit)
 	}
 	return out, nil
 }

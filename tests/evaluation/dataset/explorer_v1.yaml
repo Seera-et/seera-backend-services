@@ -1,0 +1,184 @@
+# Knowledge Explorer search cases — SRS §24 ("20 Knowledge Explorer queries")
+# and the gate for AC-002 ("≥95% retrieval success for predefined exact-search
+# tests").
+#
+# Built against the corpus that is actually ingested, per the risk named in
+# docs/QA_FEATURE_PLAN.md §10: a dataset written before the corpus measures
+# nothing but the author's expectations. Every article number and title below
+# was read out of the database, not assumed.
+#
+# Corpus these were written against:
+#   - Commercial Code of Ethiopia (Proclamation No. 1243/2021), 823 articles
+#   - The 1931 Constitution of Ethiopia, 55 articles
+#
+# `expect_documents` matches on a substring of the document title rather than an
+# id, because ids are per-database and a dataset pinned to them would only ever
+# run against one machine.
+#
+# `expect_rank: 1` is asserted only where the result is deterministic — a query
+# that names an article is a lookup, not a ranking, so anything below rank 1 is
+# a defect rather than a weak score.
+
+cases:
+  # --- Article-number lookup: the deterministic path -----------------------
+  - id: exp-001
+    query: "Article 245"
+    expect_articles: ["245"]
+    expect_documents: ["Commercial Code"]
+    expect_rank: 1
+    note: "The plainest form. Neither BM25 nor an embedding reliably returns this."
+
+  - id: exp-002
+    query: "articles 245, 246 and 247"
+    expect_articles: ["245", "246", "247"]
+    expect_documents: ["Commercial Code"]
+    note: "Enumeration. Returning only the first silently answers a third of the question."
+
+  - id: exp-003
+    query: "245"
+    expect_articles: ["245"]
+    expect_documents: ["Commercial Code"]
+    expect_rank: 1
+    note: "A bare number in a legal search box is a provision, not a phrase."
+
+  - id: exp-004
+    query: "አንቀጽ ፪፻፵፭"
+    expect_articles: ["245"]
+    expect_documents: ["Commercial Code"]
+    expect_rank: 1
+    note: >
+      Ge'ez numerals, normalised to Arabic at query time the same way the
+      extractor normalises them at ingest. A disagreement between the two sides
+      means this silently misses.
+
+  - id: exp-005
+    query: "Art. 337"
+    expect_articles: ["337"]
+    expect_documents: ["Commercial Code"]
+    expect_rank: 1
+    note: "Abbreviated form, which is how the reference is actually printed."
+
+  # --- Legal terminology: the lexical arm's job ----------------------------
+  - id: exp-006
+    query: "share company definition"
+    expect_articles: ["245"]
+    expect_documents: ["Commercial Code"]
+    note: "Terminology a lawyer would type."
+
+  - id: exp-007
+    query: "register of shareholders"
+    expect_articles: ["274"]
+    expect_documents: ["Commercial Code"]
+
+  - id: exp-008
+    query: "powers of the board of directors"
+    expect_articles: ["324", "296"]
+    expect_documents: ["Commercial Code"]
+    note: "Either the powers article or the constituting one is a correct hit."
+
+  - id: exp-009
+    query: "grounds for dissolution of a business organization"
+    expect_articles: ["181"]
+    expect_documents: ["Commercial Code"]
+
+  - id: exp-010
+    query: "trade name and trademark"
+    expect_articles: ["115"]
+    expect_documents: ["Commercial Code"]
+
+  - id: exp-011
+    query: "federal commercial register"
+    expect_articles: ["70"]
+    expect_documents: ["Commercial Code"]
+
+  - id: exp-012
+    query: "petty traders"
+    expect_articles: ["62"]
+    expect_documents: ["Commercial Code"]
+
+  - id: exp-013
+    query: "judgments in bankruptcy"
+    expect_articles: ["93"]
+    expect_documents: ["Commercial Code"]
+
+  - id: exp-014
+    query: "duties of a commercial agent"
+    expect_articles: ["44"]
+    expect_documents: ["Commercial Code"]
+
+  # --- Plain language: the semantic arm's job ------------------------------
+  # These deliberately avoid the vocabulary the provision uses. A keyword-only
+  # deployment is expected to do badly here, which is the measurement that
+  # justifies the semantic arm existing at all.
+  - id: exp-015
+    query: "can a company buy back its own shares"
+    expect_articles: ["275"]
+    expect_documents: ["Commercial Code"]
+    semantic: true
+
+  - id: exp-016
+    query: "how do I pay for shares with property instead of money"
+    expect_articles: ["282", "281"]
+    expect_documents: ["Commercial Code"]
+    semantic: true
+
+  - id: exp-017
+    query: "who is legally considered a business person"
+    expect_articles: ["5", "107", "3"]
+    expect_documents: ["Commercial Code"]
+    semantic: true
+
+  # --- The other document, so the set is not one-code-deep ----------------
+  - id: exp-018
+    query: "who inherits the throne"
+    expect_articles: ["4", "3"]
+    expect_documents: ["1931 Constitution"]
+    semantic: true
+
+  - id: exp-019
+    query: "declaring war and concluding peace"
+    expect_articles: ["12"]
+    expect_documents: ["1931 Constitution"]
+
+  # --- Out of corpus: finding nothing is the correct result ----------------
+  # These are clearly unrelated to law, and the semantic arm's similarity floor
+  # (documents.vectorMinSimilarity) is what makes rejecting them reliable.
+  # Measured 2026-09-18: their nearest chunk sits at 0.485–0.498 cosine, against
+  # 0.640–0.715 for a genuine hit.
+  - id: exp-020
+    query: "how do I bake sourdough bread at home"
+    expect_empty: true
+    note: >
+      Returning five Commercial Code articles for this is not a weak result, it
+      is a misleading one. kNN has no natural floor, so this is the case that
+      pins the one it was given.
+
+  - id: exp-021
+    query: "symptoms of type 2 diabetes in adults"
+    expect_empty: true
+
+  # --- Adjacent legal topics the corpus does not contain -------------------
+  # A known, measured limitation rather than a target. These are real legal
+  # questions about legislation that is not ingested, and their nearest chunks
+  # land at 0.588–0.636 cosine — inside the band genuine hits occupy, so no
+  # distance threshold can reject them without rejecting real results too.
+  #
+  # Telling "no tax law is indexed" from "here is the tax law" needs a reranker
+  # judging relevance, not a similarity score. Marked `adjacent` so
+  # TestExplorerAdjacentTopics reports how many still return provisions: the
+  # number is the size of the gap, and it should fall if reranking is ever added
+  # to this path.
+  - id: exp-022
+    query: "value added tax registration threshold for small businesses"
+    adjacent: true
+    note: "No tax legislation is ingested. Nearest chunk 0.611."
+
+  - id: exp-023
+    query: "penalty for driving without a licence in Addis Ababa"
+    adjacent: true
+    note: "No traffic or criminal legislation is ingested. Nearest chunk 0.636."
+
+  - id: exp-024
+    query: "maximum weekly working hours for employees"
+    adjacent: true
+    note: "No labour legislation is ingested. Nearest chunk 0.588."

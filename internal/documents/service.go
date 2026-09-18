@@ -13,6 +13,11 @@ type Store interface {
 	ResolveVersion(ctx context.Context, documentID legal.DocumentID, versionID legal.VersionID) (VersionSummary, error)
 	Articles(ctx context.Context, versionID legal.VersionID, after, limit int) ([]Article, error)
 	Stats(ctx context.Context) (Stats, error)
+
+	// SearchPool ranks the corpus and returns the fused candidate pool.
+	SearchPool(ctx context.Context, f SearchFilter, articleNumbers []string) (Pool, error)
+	// Hydrate loads the display rows for one page of that pool.
+	Hydrate(ctx context.Context, f SearchFilter, page []ranked) ([]SearchHit, error)
 }
 
 // Service serves the catalogue.
@@ -70,4 +75,46 @@ func (s *Service) Articles(
 	}
 
 	return page, nil
+}
+
+// Search ranks the corpus against a reader's query.
+//
+// Two phases, because they cost very different amounts. Ranking runs the arms
+// over identifiers only and produces a pool; hydration then loads article text
+// and builds snippets for the one page the reader is about to see. Ranking the
+// pool once and paging inside it also keeps page 2 consistent with page 1,
+// which re-running a relevance query per page does not guarantee.
+func (s *Service) Search(ctx context.Context, f SearchFilter) (SearchResult, error) {
+	numbers := articleNumbersIn(f.Term)
+
+	pool, err := s.store.SearchPool(ctx, f, numbers)
+	if err != nil {
+		return SearchResult{}, err
+	}
+
+	result := SearchResult{
+		Hits:        []SearchHit{},
+		Total:       len(pool.Ranked),
+		Capped:      pool.Capped,
+		Mode:        pool.Mode,
+		ArticleRefs: numbers,
+		Limit:       f.Limit,
+		Offset:      f.Offset,
+	}
+
+	// An offset past the end is an empty page, not an error: a reader who
+	// narrows a filter while on page 5 should see "nothing here" and be able to
+	// go back, not a failure.
+	if f.Offset >= len(pool.Ranked) {
+		return result, nil
+	}
+	end := min(f.Offset+f.Limit, len(pool.Ranked))
+
+	hits, err := s.store.Hydrate(ctx, f, pool.Ranked[f.Offset:end])
+	if err != nil {
+		return SearchResult{}, err
+	}
+	result.Hits = hits
+
+	return result, nil
 }

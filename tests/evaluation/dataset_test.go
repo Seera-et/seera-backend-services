@@ -149,3 +149,59 @@ func itoa(n int) string {
 	}
 	return string(digits)
 }
+
+// Same reasoning as the routing dataset: a malformed Explorer set should fail
+// in the ordinary suite, not only when someone runs the tagged evaluation
+// against a live corpus.
+func TestExplorerDatasetIsWellFormed(t *testing.T) {
+	dataset, err := LoadExplorerDataset()
+	if err != nil {
+		t.Fatalf("explorer dataset: %v", err)
+	}
+
+	// SRS §24 asks for 20 Knowledge Explorer queries.
+	if len(dataset.Cases) < 20 {
+		t.Errorf("dataset has %d cases, want at least the 20 the SRS specifies",
+			len(dataset.Cases))
+	}
+
+	var (
+		exact    int // deterministic article-number lookups
+		semantic int // phrased without the provision's vocabulary
+		empty    int // out of corpus
+	)
+	for _, tc := range dataset.Cases {
+		if tc.ExpectRank > 0 {
+			exact++
+		}
+		if tc.Semantic {
+			semantic++
+		}
+		if tc.ExpectEmpty {
+			empty++
+		}
+
+		for _, number := range tc.ExpectArticles {
+			if strings.TrimSpace(number) != number || number == "" {
+				t.Errorf("case %q has a padded or empty expected article %q", tc.ID, number)
+			}
+		}
+		if !tc.ExpectEmpty && !tc.Adjacent && len(tc.ExpectDocuments) == 0 {
+			t.Errorf("case %q names articles but no document; article numbers repeat across codes",
+				tc.ID)
+		}
+	}
+
+	// The mix is the point. A set of only exact lookups would score well and
+	// measure nothing about search; a set with no out-of-corpus case cannot
+	// tell a working ranking from one that always returns something.
+	if exact < 3 {
+		t.Errorf("only %d deterministic article-number cases; the exact-lookup path is the one AC-002 names", exact)
+	}
+	if semantic < 3 {
+		t.Errorf("only %d plain-language cases; without them the semantic arm is unmeasured", semantic)
+	}
+	if empty == 0 {
+		t.Error("no out-of-corpus case: nothing checks that an unanswerable query returns nothing")
+	}
+}

@@ -127,6 +127,19 @@ type TypeStat struct {
 	Documents int           `json:"documents"`
 }
 
+// DomainStat is one legal domain and how much of the corpus sits in it.
+//
+// This is the category list FR-EXP-004 browses by. It is derived from what has
+// actually been ingested rather than from a fixed list of Ethiopian legal
+// domains in code: a hardcoded taxonomy would offer the reader "Tax" as a
+// filter on a corpus with no tax legislation in it, which reads as a broken
+// search rather than an empty shelf.
+type DomainStat struct {
+	Domain    string `json:"domain"`
+	Documents int    `json:"documents"`
+	Articles  int    `json:"articles"`
+}
+
 // Stats is what the corpus actually contains, counted over published versions
 // only — the same set retrieval can see, so the number on the home page and the
 // number of things answerable are the same number.
@@ -139,17 +152,36 @@ type Stats struct {
 	Languages []LanguageStat `json:"languages"`
 	DocTypes  []TypeStat     `json:"doc_types"`
 
+	// Domains excludes documents ingested without a domain. An empty string is
+	// not a category a reader can mean, and offering it as one would filter the
+	// corpus down to "the documents whose metadata is incomplete".
+	Domains []DomainStat `json:"domains"`
+
 	LastPublishedAt *time.Time `json:"last_published_at,omitempty"`
 }
 
 // ListFilter is a validated catalogue query.
+//
+// This filters the catalogue — which documents exist. Searching inside their
+// text is SearchFilter, and the two are deliberately separate: a reader looking
+// for "the Commercial Code" and a reader looking for "capital requirements" are
+// asking different questions and want differently shaped answers.
 type ListFilter struct {
 	// Term matches the title and issuing authority. Empty matches everything.
 	Term     string
 	Language legal.Language
 	DocType  legal.DocType
-	Limit    int
-	Offset   int
+
+	// Domain matches legal_documents.legal_domain exactly, as offered by the
+	// facet list in Stats.
+	Domain string
+
+	// Year matches the publication or effective year. Either one, because the
+	// corpus has documents that record only one of the two.
+	Year int
+
+	Limit  int
+	Offset int
 }
 
 // ParseListFilter reads and bounds the query string.
@@ -180,6 +212,17 @@ func ParseListFilter(q url.Values) (ListFilter, error) {
 		}
 		f.DocType = docType
 	}
+
+	f.Domain = strings.TrimSpace(q.Get("domain"))
+	if len([]rune(f.Domain)) > maxSearchTermRunes {
+		return ListFilter{}, fmt.Errorf("domain is longer than %d characters", maxSearchTermRunes)
+	}
+
+	year, err := intParam(q, "year", 0, 1800, 2200)
+	if err != nil {
+		return ListFilter{}, err
+	}
+	f.Year = year
 
 	limit, err := intParam(q, "limit", defaultPageSize, 1, maxPageSize)
 	if err != nil {
