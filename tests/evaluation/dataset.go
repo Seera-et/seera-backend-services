@@ -329,3 +329,97 @@ func LoadExplorerDataset() (explorerDataset, error) {
 
 	return dataset, nil
 }
+
+// advisorIntake mirrors business.Intake as authored in YAML.
+//
+// Pointers for the optional answers, exactly as the DTO has them: a scenario
+// that does not mention capital is testing the "unanswered" path, and a zero
+// would test a different one.
+type advisorIntake struct {
+	Founders              int      `yaml:"founders"`
+	ActivityCode          string   `yaml:"activity_code"`
+	CapitalBirr           *float64 `yaml:"capital_birr"`
+	WantsLimitedLiability *bool    `yaml:"wants_limited_liability"`
+	RaiseFromPublic       *bool    `yaml:"raise_from_public"`
+	ForeignOwnership      *bool    `yaml:"foreign_ownership"`
+}
+
+// advisorScenario is one Business Advisor case and what must come back.
+type advisorScenario struct {
+	ID     string        `yaml:"id"`
+	Note   string        `yaml:"note"`
+	Intake advisorIntake `yaml:"intake"`
+
+	// ExpectRecommended is the structure code that must come back first.
+	// Optional: some scenarios are about what is excluded, not what is chosen.
+	ExpectRecommended string `yaml:"expect_recommended"`
+
+	// ExpectExcluded must all be ruled out; ExpectNotExcluded must all survive.
+	ExpectExcluded    []string `yaml:"expect_excluded"`
+	ExpectNotExcluded []string `yaml:"expect_not_excluded"`
+
+	// ExpectReasonCodes must each appear somewhere in the response. Codes
+	// rather than sentences so the assertion is about the reasoning and not
+	// about prose that may be reworded.
+	ExpectReasonCodes []string `yaml:"expect_reason_codes"`
+
+	ExpectStepsInclude        []string `yaml:"expect_steps_include"`
+	ExpectStepsExclude        []string `yaml:"expect_steps_exclude"`
+	ExpectCaveatsInclude      []string `yaml:"expect_caveats_include"`
+	ExpectNoLicences          bool     `yaml:"expect_no_licences"`
+	ExpectUnsupportedMentions []string `yaml:"expect_unsupported_mentions"`
+}
+
+type advisorDataset struct {
+	Scenarios []advisorScenario `yaml:"scenarios"`
+}
+
+// LoadAdvisorDataset reads and validates the Business Advisor scenarios.
+func LoadAdvisorDataset() (advisorDataset, error) {
+	raw, err := os.ReadFile(filepath.Join("dataset", "advisor_v1.yaml"))
+	if err != nil {
+		return advisorDataset{}, fmt.Errorf("read dataset: %w", err)
+	}
+
+	var dataset advisorDataset
+	if err := yaml.Unmarshal(raw, &dataset); err != nil {
+		return advisorDataset{}, fmt.Errorf("parse dataset: %w", err)
+	}
+	if len(dataset.Scenarios) == 0 {
+		return advisorDataset{}, fmt.Errorf("dataset is empty")
+	}
+
+	seen := map[string]bool{}
+	for _, sc := range dataset.Scenarios {
+		switch {
+		case sc.ID == "":
+			return advisorDataset{}, fmt.Errorf("a scenario is missing its id")
+		case seen[sc.ID]:
+			return advisorDataset{}, fmt.Errorf("duplicate scenario id %q", sc.ID)
+		case sc.Intake.Founders < 1:
+			// The DTO rejects this, so a scenario with it would only ever be
+			// testing the validator by accident.
+			return advisorDataset{}, fmt.Errorf("scenario %q has %d founders",
+				sc.ID, sc.Intake.Founders)
+		case !sc.asserts():
+			return advisorDataset{}, fmt.Errorf(
+				"scenario %q asserts nothing; it would pass on any output", sc.ID)
+		}
+		seen[sc.ID] = true
+	}
+
+	return dataset, nil
+}
+
+// asserts reports whether the scenario actually checks something.
+func (sc advisorScenario) asserts() bool {
+	return sc.ExpectRecommended != "" ||
+		len(sc.ExpectExcluded) > 0 ||
+		len(sc.ExpectNotExcluded) > 0 ||
+		len(sc.ExpectReasonCodes) > 0 ||
+		len(sc.ExpectStepsInclude) > 0 ||
+		len(sc.ExpectStepsExclude) > 0 ||
+		len(sc.ExpectCaveatsInclude) > 0 ||
+		len(sc.ExpectUnsupportedMentions) > 0 ||
+		sc.ExpectNoLicences
+}

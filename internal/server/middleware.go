@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"log/slog"
 	"net"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/go-chi/chi/v5/middleware"
 	"golang.org/x/time/rate"
+
+	"github.com/Seera-et/seera-backend-services/internal/auth"
 )
 
 // requestLogger logs one line per request, after it completes.
@@ -95,8 +98,14 @@ func cors(allowed []string) func(http.Handler) http.Handler {
 				h := w.Header()
 				h.Set("Access-Control-Allow-Origin", origin)
 				h.Add("Vary", "Origin")
-				h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-				h.Set("Access-Control-Allow-Headers", "Content-Type, Accept")
+				h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+				// Authorization carries the user's token. Without it named here
+				// the browser's preflight fails and every authenticated request
+				// dies before it is sent — and it fails only in production,
+				// because the Vite dev proxy makes local requests same-origin so
+				// no preflight ever happens. seera.site calling api.seera.site
+				// is cross-origin and does preflight.
+				h.Set("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization")
 				h.Set("Access-Control-Max-Age", "600")
 			}
 			if r.Method == http.MethodOptions {
@@ -144,9 +153,99 @@ func requireAdminToken(token string) func(http.Handler) http.Handler {
 	}
 }
 
-// ipRateLimiter is a per-client token bucket, for the endpoints that cost real
-// money per call. Unauthenticated by design (auth is out of MVP scope), so the
-// client key is its IP.
+// userVerifier turns a bearer token into a user. Declared here, by the consumer,
+// and satisfied by *auth.Verifier — so the server package depends on a method,
+// not on how tokens happen to be signed this year.
+type userVerifier interface {
+	Verify(ctx context.Context, raw string) (auth.User, error)
+}
+
+// requireUser rejects a request that does not carry a valid user token.
+//
+// This is the real access control. The frontend's route guard decides what to
+// render; it cannot decide what the API will serve, and anyone can call these
+// endpoints directly. In particular /qa/query spends a Gemini call per request,
+// so "the UI hides the page" is not a control, it is a suggestion.
+//
+// The reason a token was rejected is logged and never returned. "Expired",
+// "wrong issuer" and "bad signature" each tell a caller which part of their
+// guess was right; the client only needs to know to sign in again.
+func requireUser(v userVerifier, log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token, ok := bearerToken(r)
+			if !ok {
+				unauthorized(w, r)
+				return
+			}
+
+			user, err := v.Verify(r.Context(), token)
+			if err != nil {
+				log.InfoContext(r.Context(), "rejected user token",
+					slog.String("path", r.URL.Path),
+					slog.Any("error", err))
+				unauthorized(w, r)
+				return
+			}
+
+			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), user)))
+		})
+	}
+}
+
+// optionalUser attaches the user when a valid token is present and otherwise
+// does nothing. It is for endpoints that are public but behave better when they
+// know who is calling — the rate limiter keys on the user id when it has one.
+//
+// An invalid token is ignored rather than rejected: these routes serve anonymous
+// callers by definition, and a stale token in a forgotten tab should degrade to
+// anonymous, not to an error page on a public document.
+func optionalUser(v userVerifier, log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token, ok := bearerToken(r)
+			if !ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			user, err := v.Verify(r.Context(), token)
+			if err != nil {
+				log.DebugContext(r.Context(), "ignoring invalid token on public route",
+					slog.String("path", r.URL.Path),
+					slog.Any("error", err))
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), user)))
+		})
+	}
+}
+
+func bearerToken(r *http.Request) (string, bool) {
+	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return "", false
+	}
+	raw = strings.TrimSpace(raw)
+	return raw, raw != ""
+}
+
+func unauthorized(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("WWW-Authenticate", `Bearer realm="api"`)
+	writeError(w, r, http.StatusUnauthorized, "unauthorized",
+		"Sign in to use this endpoint.")
+}
+
+// ipRateLimiter is a per-client token bucket for the endpoints that cost real
+// money per call.
+//
+// The key is the user id when the request carries one and the client IP
+// otherwise. Keying on IP alone punishes everyone behind one NAT for each
+// other's usage — which in Ethiopia, where mobile carriers NAT aggressively,
+// means a shared office can exhaust the limit between them — and lets a
+// determined caller reset their bucket by changing address.
 type ipRateLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
@@ -196,7 +295,7 @@ func (l *ipRateLimiter) evict(idleFor time.Duration) {
 // middleware enforces the limit, replying 429 with Retry-After.
 func (l *ipRateLimiter) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !l.allow(clientIP(r)) {
+		if !l.allow(clientKey(r)) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, r, http.StatusTooManyRequests, "rate_limited",
 				"Too many requests. Please wait a moment and try again.")
@@ -204,6 +303,16 @@ func (l *ipRateLimiter) middleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// clientKey identifies who to charge a request to: the authenticated user if
+// there is one, otherwise the client address. The "user:" prefix keeps the two
+// namespaces from ever colliding.
+func clientKey(r *http.Request) string {
+	if user, ok := auth.UserFrom(r.Context()); ok {
+		return "user:" + user.ID
+	}
+	return "ip:" + clientIP(r)
 }
 
 // clientIP prefers chi's RealIP result and falls back to the socket address.

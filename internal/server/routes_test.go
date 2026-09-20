@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Seera-et/seera-backend-services/internal/auth"
 	"github.com/Seera-et/seera-backend-services/internal/config"
 )
 
@@ -285,4 +287,151 @@ func chiSubrouter() http.Handler {
 		_, _ = w.Write([]byte("articles"))
 	})
 	return r
+}
+
+// --- user authentication -----------------------------------------------------
+
+// stubVerifier accepts exactly one token, so a test can tell "rejected" apart
+// from "route not registered" without importing the real JWT machinery.
+type stubVerifier struct{}
+
+func (stubVerifier) Verify(_ context.Context, raw string) (auth.User, error) {
+	if raw != "good-token" {
+		return auth.User{}, auth.ErrUnauthenticated
+	}
+	return auth.User{ID: "user-1", Email: "abebe@example.com"}, nil
+}
+
+func newAuthTestServer(t *testing.T, handlers Handlers) *Server {
+	t.Helper()
+	handlers.Verifier = stubVerifier{}
+	return New(config.Config{
+		Env: "dev", Addr: ":0", MaxRequestBytes: 1 << 20,
+		CORSAllowedOrigins: []string{"https://seera.site"},
+		RateLimitRPS:       100, RateLimitBurst: 100,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), stubDB{}, handlers)
+}
+
+func userEchoHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.UserFrom(r.Context())
+		_, _ = w.Write([]byte(user.ID))
+	}
+}
+
+// The frontend route guard is presentation. This is the control: /qa/query
+// spends a Gemini call per request and is one curl away from anyone.
+func TestQARouteRequiresAUser(t *testing.T) {
+	srv := newAuthTestServer(t, Handlers{QA: userEchoHandler()})
+
+	for _, tc := range []struct {
+		name, header string
+		want         int
+	}{
+		{"no header", "", http.StatusUnauthorized},
+		{"not a bearer token", "good-token", http.StatusUnauthorized},
+		{"rejected token", "Bearer nonsense", http.StatusUnauthorized},
+		{"empty bearer", "Bearer ", http.StatusUnauthorized},
+		{"valid token", "Bearer good-token", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/qa/query", nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			rec := httptest.NewRecorder()
+			srv.routes().ServeHTTP(rec, req)
+
+			if rec.Code != tc.want {
+				t.Errorf("status = %d, want %d (body %q)", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+// The authenticated handler must be able to see who is calling.
+func TestAuthenticatedHandlerReceivesTheUser(t *testing.T) {
+	srv := newAuthTestServer(t, Handlers{QA: userEchoHandler()})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/qa/query", nil)
+	req.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Body.String() != "user-1" {
+		t.Errorf("handler saw user %q, want %q", rec.Body.String(), "user-1")
+	}
+}
+
+// Same posture as the admin token: no verifier means the route does not exist,
+// rather than existing and serving everyone.
+func TestAuthenticatedRoutesDisabledWithoutAVerifier(t *testing.T) {
+	srv := New(config.Config{
+		Env: "dev", Addr: ":0", MaxRequestBytes: 1 << 20,
+		RateLimitRPS: 100, RateLimitBurst: 100,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), stubDB{}, Handlers{
+		QA: userEchoHandler(),
+		Me: userEchoHandler(),
+	})
+
+	for _, path := range []string{"/api/v1/qa/query", "/api/v1/me"} {
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404 — an unauthenticatable route must not exist",
+				path, rec.Code)
+		}
+	}
+}
+
+// Browsing published law needs no account. A visitor has to be able to see the
+// corpus before deciding whether to sign up for it.
+func TestCorpusRoutesStayPublic(t *testing.T) {
+	srv := newAuthTestServer(t, Handlers{
+		Documents:   chiSubrouter(),
+		CorpusStats: userEchoHandler(),
+	})
+
+	for _, path := range []string{"/api/v1/documents", "/api/v1/corpus/stats"} {
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d without a token, want 200", path, rec.Code)
+		}
+	}
+}
+
+// A stale token in a forgotten tab must degrade a public page to anonymous,
+// not break it.
+func TestPublicRoutesIgnoreAnInvalidToken(t *testing.T) {
+	srv := newAuthTestServer(t, Handlers{CorpusStats: userEchoHandler()})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/corpus/stats", nil)
+	req.Header.Set("Authorization", "Bearer expired-nonsense")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 — an invalid token on a public route "+
+			"should be ignored, not rejected", rec.Code)
+	}
+}
+
+// Invisible locally (the Vite proxy makes dev same-origin, so no preflight
+// happens) and fatal in production, where seera.site calls api.seera.site.
+func TestCORSAllowsTheAuthorizationHeader(t *testing.T) {
+	srv := newAuthTestServer(t, Handlers{QA: userEchoHandler()})
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/qa/query", nil)
+	req.Header.Set("Origin", "https://seera.site")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	allowed := rec.Header().Get("Access-Control-Allow-Headers")
+	if !strings.Contains(strings.ToLower(allowed), "authorization") {
+		t.Errorf("Access-Control-Allow-Headers = %q, want it to include Authorization "+
+			"or every authenticated cross-origin request fails preflight", allowed)
+	}
 }

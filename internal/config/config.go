@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -92,6 +93,20 @@ type Config struct {
 	// is worse than no ingestion endpoint.
 	AdminToken Secret
 
+	// SupabaseProjectURL is the origin of the Supabase project that issues user
+	// tokens, e.g. https://<ref>.supabase.co. It is not a secret: it identifies
+	// the issuer and locates the public JWKS the API verifies signatures
+	// against. Empty leaves every authenticated route unregistered, the same
+	// posture AdminToken takes — a route that cannot authenticate its caller
+	// should not exist rather than fail open.
+	SupabaseProjectURL string
+
+	// SupabaseJWTAudience is the `aud` claim required on a user token. Supabase
+	// issues "authenticated" for signed-in users and "anon" for the public key's
+	// own token; accepting the latter would treat any visitor as a user, so this
+	// is checked rather than assumed.
+	SupabaseJWTAudience string
+
 	CORSAllowedOrigins []string
 
 	// HTTP server tuning. There is deliberately no write timeout — see
@@ -145,6 +160,9 @@ func Load() (Config, error) {
 		OpenRouterAPIKey: Secret(os.Getenv("OPENROUTER_API_KEY")),
 		OpenRouterModel:  envString("OPENROUTER_MODEL", ""),
 
+		SupabaseProjectURL:  strings.TrimRight(envString("SUPABASE_PROJECT_URL", ""), "/"),
+		SupabaseJWTAudience: envString("SUPABASE_JWT_AUDIENCE", "authenticated"),
+
 		CORSAllowedOrigins: envStrings("CORS_ALLOWED_ORIGINS", []string{"http://localhost:5173"}),
 	}
 
@@ -161,6 +179,25 @@ func Load() (Config, error) {
 	}
 	if err := validateModelName("GEMINI_MODEL", cfg.GeminiModel); err != nil {
 		fail("%w", err)
+	}
+	// Checked at boot rather than on the first sign-in: this value is compared
+	// against the `iss` claim of every user token, so a typo here rejects every
+	// user with an error that looks like a token problem.
+	if cfg.SupabaseProjectURL != "" {
+		u, err := url.Parse(cfg.SupabaseProjectURL)
+		switch {
+		case err != nil:
+			fail("SUPABASE_PROJECT_URL is not a valid URL: %w", err)
+		case u.Scheme != "https" && u.Host != "localhost" && !strings.HasPrefix(u.Host, "localhost:"):
+			// http is allowed only against a local Supabase stack; a token
+			// fetched over plaintext anywhere else is not a credential.
+			fail("SUPABASE_PROJECT_URL must be https, got %q", cfg.SupabaseProjectURL)
+		case u.Host == "":
+			fail("SUPABASE_PROJECT_URL has no host: %q", cfg.SupabaseProjectURL)
+		}
+	}
+	if cfg.SupabaseJWTAudience == "" {
+		fail("SUPABASE_JWT_AUDIENCE must not be empty")
 	}
 
 	port, err := envInt("PORT", 8080)

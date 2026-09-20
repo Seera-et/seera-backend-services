@@ -23,16 +23,21 @@ func (s *Server) routes() http.Handler {
 	r.Get("/healthz", s.handleHealth)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Public API. Rate limited because every endpoint under it either costs
-		// money per call or hits the database for an unauthenticated caller,
-		// and body-capped at the small public limit.
+		// Public API: browsing published law. No account needed — a visitor
+		// should be able to read the corpus and judge whether it is worth
+		// signing up for, and these endpoints cost a database read, not a
+		// model call.
+		//
+		// optionalUser attaches the caller when they happen to be signed in,
+		// purely so the rate limiter can charge them rather than their NAT.
+		// An anonymous or stale-token request is served normally.
 		r.Group(func(r chi.Router) {
+			if s.handlers.Verifier != nil {
+				r.Use(optionalUser(s.handlers.Verifier, s.log))
+			}
 			r.Use(s.limiter.middleware)
 			r.Use(limitBody(s.cfg.MaxRequestBytes))
 
-			if s.handlers.QA != nil {
-				r.Method(http.MethodPost, "/qa/query", s.handlers.QA)
-			}
 			if s.handlers.Citation != nil {
 				// The endpoint that makes "click a citation, see the exact
 				// source text" work.
@@ -50,13 +55,42 @@ func (s *Server) routes() http.Handler {
 			}
 		})
 
+		// Authenticated API: everything that spends money or belongs to one
+		// person. Registered only when tokens can actually be verified, for the
+		// same reason the admin group is: a route that cannot identify its
+		// caller must not exist rather than fall open.
+		//
+		// The frontend guards these routes too, but that guard is presentation.
+		// This is the control — /qa/query costs a Gemini call per request and
+		// is one curl away from anyone who opens the network tab.
+		if s.handlers.Verifier != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(requireUser(s.handlers.Verifier, s.log))
+				r.Use(s.limiter.middleware)
+				r.Use(limitBody(s.cfg.MaxRequestBytes))
+
+				if s.handlers.Me != nil {
+					r.Method(http.MethodGet, "/me", s.handlers.Me)
+				}
+				if s.handlers.QA != nil {
+					r.Method(http.MethodPost, "/qa/query", s.handlers.QA)
+				}
+				if s.handlers.Business != nil {
+					// The Business & License Advisor: deterministic, cited, and
+					// registered only when a rule set can be loaded at all.
+					r.Mount("/business", s.handlers.Business)
+				}
+			})
+		}
+
 		// Admin API. Registered only when a token is configured: an
 		// unauthenticated write path into the legal corpus must not exist even
 		// by accident, so a missing token disables the route rather than
 		// leaving it open. Mounted whenever any admin handler is wired, not
 		// just ingestion — trace lookup is read-only but still internal-only,
 		// so it shares the same guard rather than getting a weaker one.
-		hasAdminHandler := s.handlers.Ingest != nil || s.handlers.Traces != nil
+		hasAdminHandler := s.handlers.Ingest != nil || s.handlers.Traces != nil ||
+			s.handlers.BusinessRules != nil
 		if hasAdminHandler && !s.cfg.AdminToken.Empty() {
 			r.Route("/admin", func(r chi.Router) {
 				r.Use(requireAdminToken(s.cfg.AdminToken.Value()))
@@ -67,6 +101,16 @@ func (s *Server) routes() http.Handler {
 						// public limit would reject every real document.
 						r.Use(limitBody(s.cfg.MaxIngestBytes))
 						r.Method(http.MethodPost, "/documents/ingest", s.handlers.Ingest)
+					})
+				}
+				if s.handlers.BusinessRules != nil {
+					// A rule set is a few tens of kilobytes of curated JSON —
+					// larger than the public limit, far smaller than a parsed
+					// legal code, so it shares ingestion's generous cap rather
+					// than getting a third limit of its own.
+					r.Group(func(r chi.Router) {
+						r.Use(limitBody(s.cfg.MaxIngestBytes))
+						r.Method(http.MethodPost, "/business/rules", s.handlers.BusinessRules)
 					})
 				}
 				if s.handlers.Traces != nil {

@@ -205,3 +205,42 @@ func TestExplorerDatasetIsWellFormed(t *testing.T) {
 		t.Error("no out-of-corpus case: nothing checks that an unanswerable query returns nothing")
 	}
 }
+
+func TestAdvisorDatasetIsWellFormed(t *testing.T) {
+	dataset, err := LoadAdvisorDataset()
+	if err != nil {
+		t.Fatalf("advisor dataset: %v", err)
+	}
+
+	// SRS §24 asks for 10 Business Advisor scenarios.
+	if len(dataset.Scenarios) < 10 {
+		t.Errorf("dataset has %d scenarios, want at least the 10 the SRS specifies",
+			len(dataset.Scenarios))
+	}
+
+	var withRecommendation, withExclusion int
+	for _, sc := range dataset.Scenarios {
+		if sc.ExpectRecommended != "" {
+			withRecommendation++
+		}
+		if len(sc.ExpectExcluded) > 0 {
+			withExclusion++
+		}
+		if strings.TrimSpace(sc.Note) == "" {
+			// Every scenario asserts something about Ethiopian law. Without a
+			// note saying which provision makes it true, a later reader cannot
+			// tell a deliberate expectation from a recorded bug.
+			t.Errorf("scenario %q has no note explaining why its expectation is correct", sc.ID)
+		}
+	}
+
+	// A set that only ever checks the happy path would not catch the rules that
+	// matter most — the ones that rule a form out.
+	if withRecommendation < 4 {
+		t.Errorf("only %d scenarios assert a recommendation", withRecommendation)
+	}
+	if withExclusion < 4 {
+		t.Errorf("only %d scenarios assert an exclusion; disqualification is where the legal thresholds bite",
+			withExclusion)
+	}
+}

@@ -51,9 +51,29 @@ type Handlers struct {
 	// CorpusStats serves GET /api/v1/corpus/stats.
 	CorpusStats http.Handler
 
+	// Business serves the advisor under /api/v1/business: the intake
+	// questionnaire and the recommendation.
+	Business http.Handler
+
 	// Traces serves GET /api/v1/admin/traces/{request_id} — looks up what one
 	// past request decided, for debugging.
 	Traces http.Handler
+
+	// BusinessRules serves POST /api/v1/admin/business/rules — loads the
+	// advisor's rule set. A write path into legal content, so it lives behind
+	// the admin token with ingestion.
+	BusinessRules http.Handler
+
+	// Me serves GET /api/v1/me. Nil when SUPABASE_PROJECT_URL is unset, which
+	// is also when Verifier is nil and the whole authenticated group goes
+	// unregistered.
+	Me http.Handler
+
+	// Verifier validates user tokens. Nil disables every route that requires a
+	// signed-in caller — the same posture as a missing provider credential:
+	// a route that cannot identify its caller should not exist rather than
+	// guess, and a 404 is an honest answer where "open to everyone" is not.
+	Verifier userVerifier
 }
 
 // Server is the HTTP server and everything it needs.

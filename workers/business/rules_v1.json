@@ -1,0 +1,627 @@
+{
+  "label": "commercial-code-1243-2021-v1",
+  "notes": "Business structures, trade activities and registration steps drawn entirely from the Commercial Code of Ethiopia (Proclamation No. 1243/2021) as indexed in this corpus. Every threshold below was read out of the article it cites. Where the Code refers to a limit without stating it — notably the minimum number of shareholders in a share company, which Art. 473/1/a presupposes — the bound is omitted rather than guessed, and the engine reports it as unestablished. Authored 2026-09-18.",
+  "structures": [
+    {
+      "code": "sole_proprietorship",
+      "name": "Sole proprietorship",
+      "summary": "One person trading in their own name. Not a business organization under Art. 174 — the Code treats a sole trader separately — so there is no memorandum of association and no separate legal personality.",
+      "min_members": 1,
+      "max_members": 1,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "3",
+          "facet": "members"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "538"
+        }
+      ]
+    },
+    {
+      "code": "general_partnership",
+      "name": "General partnership",
+      "summary": "Partners are each jointly and severally liable with the partnership itself for its obligations.",
+      "liability": "unlimited",
+      "min_members": 2,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "174",
+          "pinpoint": "174/1"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "183",
+          "facet": "liability"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "172",
+          "pinpoint": "172/1",
+          "facet": "members"
+        }
+      ]
+    },
+    {
+      "code": "limited_partnership",
+      "name": "Limited partnership",
+      "summary": "Two classes of partner: general partners fully liable jointly and severally with the partnership, and limited partners whose exposure is capped. Because the two classes differ, this form is not scored against a single liability preference.",
+      "liability": "mixed — general partners fully liable, limited partners capped (Art. 212)",
+      "min_members": 2,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "174",
+          "pinpoint": "174/2"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "212",
+          "facet": "liability"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "172",
+          "pinpoint": "172/1",
+          "facet": "members"
+        }
+      ]
+    },
+    {
+      "code": "llp",
+      "name": "Limited liability partnership",
+      "name_suffix": "Limited Liability Partnership",
+      "summary": "For rendering professional services. Partners' liability is limited, but the partnership itself is jointly, severally and without limit liable for fault or damage caused by a partner or employee in the course of its activities (Art. 228) — so this form is not scored against a simple liability preference either.",
+      "liability": "limited for partners, unlimited for the partnership on fault (Art. 221, 228)",
+      "min_members": 2,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "174",
+          "pinpoint": "174/3"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "221",
+          "facet": "members"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "228",
+          "facet": "liability"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "223"
+        }
+      ]
+    },
+    {
+      "code": "joint_venture",
+      "name": "Joint venture",
+      "summary": "An agreement between two or more persons. It has no legal personality, its existence is not disclosed to third parties, and it is not entered in the commercial register.",
+      "min_members": 2,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "174",
+          "pinpoint": "174/4"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "234",
+          "facet": "members"
+        }
+      ]
+    },
+    {
+      "code": "share_company",
+      "name": "Share company",
+      "name_suffix": "Share company",
+      "summary": "Capital fixed in advance and divided into shares; the company's liabilities are met only from its own assets, and a shareholder's obligation is limited to the contribution pledged. May raise capital by public subscription.",
+      "liability": "limited",
+      "allows_public_subscription": true,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "174",
+          "pinpoint": "174/5"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "245",
+          "facet": "liability"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "254"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "258",
+          "facet": "public_shares"
+        }
+      ]
+    },
+    {
+      "code": "plc",
+      "name": "Private limited company",
+      "name_suffix": "Private Limited Company",
+      "summary": "Capital fully paid in advance and divided into shares. Members are not liable for the company's debts once their contributions are paid up. Shares may not be offered to the public and the company may not issue transferable securities.",
+      "liability": "limited",
+      "min_members": 2,
+      "max_members": 50,
+      "min_capital": 15000,
+      "min_share_par": 100,
+      "currency": "ETB",
+      "allows_public_subscription": false,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "174",
+          "pinpoint": "174/6"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "495",
+          "pinpoint": "495/4",
+          "facet": "members"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "496",
+          "pinpoint": "496/1",
+          "facet": "capital"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "497",
+          "facet": "general"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "495",
+          "pinpoint": "495/1",
+          "facet": "liability"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "495",
+          "pinpoint": "495/2",
+          "facet": "public_shares"
+        }
+      ]
+    },
+    {
+      "code": "one_person_plc",
+      "name": "One person private limited company",
+      "name_suffix": "Private Limited Company",
+      "summary": "Incorporated by the unilateral declaration of a single person, with legal personality separate from the member. The member is not personally liable for the company's debts once the contribution is fully made. A one member company may not itself establish another one.",
+      "liability": "limited",
+      "min_members": 1,
+      "max_members": 1,
+      "min_capital": 15000,
+      "currency": "ETB",
+      "allows_public_subscription": false,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "174",
+          "pinpoint": "174/7"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "534",
+          "facet": "members"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "535",
+          "facet": "capital"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "539"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "534",
+          "pinpoint": "534/3",
+          "facet": "liability"
+        }
+      ]
+    }
+  ],
+  "activities": [
+    {
+      "code": "retail_wholesale",
+      "name": "Buying and reselling goods, retail or wholesale",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/1"
+        }
+      ]
+    },
+    {
+      "code": "letting_hire",
+      "name": "Letting property or goods for hire",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/2"
+        }
+      ]
+    },
+    {
+      "code": "agriculture",
+      "name": "Commercial agriculture or forestry",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/3"
+        }
+      ]
+    },
+    {
+      "code": "manufacturing",
+      "name": "Foodstuff or goods production and processing",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/10"
+        }
+      ]
+    },
+    {
+      "code": "construction",
+      "name": "Building and construction works",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/11"
+        }
+      ]
+    },
+    {
+      "code": "transport",
+      "name": "Carriage of goods or passengers",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/13"
+        }
+      ]
+    },
+    {
+      "code": "ict",
+      "name": "Software, data and internet services",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/25"
+        }
+      ]
+    },
+    {
+      "code": "financial_services",
+      "name": "Banking, insurance or other financial services",
+      "regulated": true,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/26"
+        }
+      ]
+    },
+    {
+      "code": "hospitality",
+      "name": "Hotels, restaurants, cafes and catering",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/27"
+        }
+      ]
+    },
+    {
+      "code": "travel",
+      "name": "Travel agency and tour operation",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/29"
+        }
+      ]
+    },
+    {
+      "code": "consulting",
+      "name": "Consulting, audit and professional services",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/31"
+        }
+      ]
+    },
+    {
+      "code": "health",
+      "name": "Health, diagnostic and veterinary services",
+      "regulated": true,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/32"
+        }
+      ]
+    },
+    {
+      "code": "education",
+      "name": "Education and training services",
+      "regulated": true,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/33"
+        }
+      ]
+    },
+    {
+      "code": "security",
+      "name": "Security services for persons or property",
+      "regulated": true,
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "5",
+          "pinpoint": "5/35"
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "kind": "step",
+      "title": "Draw up a memorandum of association",
+      "detail": "A business organization is established through a memorandum of association by the persons bringing together the contributions.",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "172",
+          "pinpoint": "172/1"
+        }
+      ],
+      "structure_codes": [
+        "general_partnership",
+        "limited_partnership",
+        "llp",
+        "joint_venture",
+        "share_company",
+        "plc"
+      ]
+    },
+    {
+      "kind": "step",
+      "title": "Register in the commercial register",
+      "detail": "Every business organization other than a joint venture acquires legal personality on registration in the commercial register. The Ministry of Trade and Industry establishes and administers the Federal Commercial Register, with nationwide application.",
+      "authority": "Ministry of Trade and Industry",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "175"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "70"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "70",
+          "pinpoint": "70/2"
+        }
+      ],
+      "structure_codes": [
+        "sole_proprietorship",
+        "general_partnership",
+        "limited_partnership",
+        "llp",
+        "share_company",
+        "plc",
+        "one_person_plc"
+      ]
+    },
+    {
+      "kind": "step",
+      "title": "Show your registration details on business papers",
+      "detail": "A registered trader must state the place of registration and the registration number on all papers used in the business.",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "76"
+        }
+      ],
+      "structure_codes": [
+        "sole_proprietorship",
+        "general_partnership",
+        "limited_partnership",
+        "llp",
+        "share_company",
+        "plc",
+        "one_person_plc"
+      ]
+    },
+    {
+      "kind": "step",
+      "structure_code": "plc",
+      "title": "End the company name with \"Private Limited Company\"",
+      "detail": "The firm-name must indicate the business purpose and be followed by the words \"Private Limited Company\".",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "497"
+        }
+      ]
+    },
+    {
+      "kind": "step",
+      "structure_code": "plc",
+      "title": "Pay up the capital in full before formation",
+      "detail": "A private limited company's capital is fully paid in advance. The par value of each share may not be less than 100 ETB and all shares must be of equal par value.",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "495",
+          "pinpoint": "495/1"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "496",
+          "pinpoint": "496/2"
+        }
+      ]
+    },
+    {
+      "kind": "step",
+      "structure_code": "plc",
+      "title": "Include the required particulars in the memorandum",
+      "detail": "The memorandum must show the members' names, nationality and addresses, the company name, head office and branches, the business purposes, and the other particulars Art. 500 lists.",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "500"
+        }
+      ]
+    },
+    {
+      "kind": "step",
+      "structure_code": "one_person_plc",
+      "title": "Declare the company unilaterally and pay up at least 15,000 ETB",
+      "detail": "A one member private limited company is incorporated by the unilateral declaration of a single person, and its capital may not be less than 15,000 ETB.",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "534",
+          "pinpoint": "534/1"
+        },
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "535"
+        }
+      ]
+    },
+    {
+      "kind": "step",
+      "structure_code": "share_company",
+      "title": "Follow the company name with \"Share company\"",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "246"
+        }
+      ]
+    },
+    {
+      "kind": "step",
+      "structure_code": "share_company",
+      "title": "Subscribe the capital fully and pay a quarter of it in cash",
+      "detail": "A share company may not be formed until the capital has been fully subscribed and at least one quarter of the par value of shares sold in cash has been paid up.",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "254",
+          "pinpoint": "254/1"
+        }
+      ]
+    },
+    {
+      "kind": "step",
+      "structure_code": "share_company",
+      "title": "Include the required particulars in the memorandum",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "255"
+        }
+      ]
+    },
+    {
+      "kind": "step",
+      "structure_code": "llp",
+      "title": "Follow the partnership name with \"Limited Liability Partnership\"",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "223"
+        }
+      ]
+    },
+    {
+      "kind": "caveat",
+      "structure_code": "share_company",
+      "title": "The minimum number of shareholders is not stated in the indexed text",
+      "detail": "Art. 473/1/a makes a share company dissolvable where the number of shareholders falls below \"the legally required minimum\", but the indexed version of the Code does not state that number. Confirm it before relying on a shareholder count.",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "473",
+          "pinpoint": "473/1"
+        }
+      ]
+    },
+    {
+      "kind": "caveat",
+      "structure_code": "joint_venture",
+      "title": "A joint venture has no legal personality and is not registered",
+      "detail": "Its existence is not disclosed to third parties and the registration formalities that apply to other business organizations do not apply to it — so the registration steps above do not produce a separate legal person here.",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "234"
+        }
+      ]
+    },
+    {
+      "kind": "caveat",
+      "structure_code": "one_person_plc",
+      "title": "A one member company may not establish another one",
+      "sources": [
+        {
+          "document": "Proclamation No. 1243/2021",
+          "article": "539",
+          "pinpoint": "539/1"
+        }
+      ]
+    },
+    {
+      "kind": "caveat",
+      "activity_code": "financial_services",
+      "title": "Financial services are licensed under legislation that is not indexed here",
+      "detail": "Banking, insurance and microfinance each have their own proclamation, and none of them is in this corpus. The Commercial Code tells you that operating these services makes you a trader; it does not tell you what licence you need. Treat the absence of a licence below as missing information, not as permission."
+    },
+    {
+      "kind": "caveat",
+      "title": "This is legal information, not legal advice",
+      "detail": "The recommendation above is produced by applying published provisions to the answers given. It does not account for your particular circumstances. Consult a qualified Ethiopian legal professional before acting on it."
+    }
+  ]
+}

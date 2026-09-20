@@ -4,6 +4,10 @@ coverage.out
 
 .env
 .env.local
+# Any other .env variant — backups and per-environment copies carry the same
+# API keys as .env and must never be committed.
+.env.*
+!.env.example
 *.pem
 *.key
 

@@ -1,0 +1,162 @@
+# Business & License Advisor scenarios — SRS §24 ("10 Business Advisor
+# scenarios") and the gate for AC-003.
+#
+# AC-003's pass condition is absolute: "100% of predefined MVP scenarios produce
+# the expected rule-based recommendation." That is only a fair bar because the
+# recommendation is deterministic — no model, no retrieval ranking, no
+# temperature. A failure here is a rule bug or a rule-data error, never noise.
+#
+# Written against the published rule set commercial-code-1243-2021-v1, which is
+# drawn from the Commercial Code of Ethiopia (Proclamation No. 1243/2021). The
+# expectations below are what the *Code* requires, checked against the articles
+# each one names; they are not a snapshot of whatever the engine happened to
+# return.
+
+scenarios:
+  - id: adv-001
+    note: >
+      The PRD's flagship example: a small partnership with enough capital,
+      wanting protection from the business's debts. Art. 495/4 admits 2-50
+      members and Art. 496/1 sets the 15,000 ETB floor, both of which this
+      meets.
+    intake:
+      founders: 2
+      activity_code: retail_wholesale
+      capital_birr: 50000
+      wants_limited_liability: true
+    expect_recommended: plc
+    expect_excluded: [sole_proprietorship, one_person_plc]
+    expect_steps_include:
+      - "Register in the commercial register"
+      - "End the company name with \"Private Limited Company\""
+
+  - id: adv-002
+    note: >
+      One founder who wants limited liability. The one member private limited
+      company exists for precisely this (Art. 534/1) and its 15,000 ETB floor
+      (Art. 535) is met; every two-member form is out.
+    intake:
+      founders: 1
+      capital_birr: 20000
+      wants_limited_liability: true
+    expect_recommended: one_person_plc
+    expect_excluded: [plc, general_partnership, limited_partnership, llp, joint_venture]
+
+  - id: adv-003
+    note: >
+      One founder, no capital figure, no stated liability preference. Nothing
+      points away from trading in their own name, and an unanswered capital
+      question must not rule anything out.
+    intake:
+      founders: 1
+      activity_code: consulting
+    expect_recommended: sole_proprietorship
+    expect_excluded: [plc, general_partnership]
+    expect_steps_exclude:
+      # Art. 172/1 requires a memorandum of a business *organization*. A sole
+      # trader is not one (Art. 3), so telling them to draw one up would be
+      # advice the Code does not support.
+      - "Draw up a memorandium of association"
+      - "Draw up a memorandum of association"
+
+  - id: adv-004
+    note: >
+      Raising capital from the public. Art. 495/2 bars a private limited
+      company from public subscription outright, and Art. 258 is the share
+      company's public-subscription route — so this is a legal bar, not a
+      preference.
+    intake:
+      founders: 5
+      raise_from_public: true
+    expect_recommended: share_company
+    expect_excluded: [plc, sole_proprietorship, one_person_plc]
+    expect_reason_codes: [public_shares_allowed]
+
+  - id: adv-005
+    note: >
+      Capital below the private limited company's statutory minimum. Art. 496/1
+      says the capital "may not be less than" 15,000 ETB, so the form cannot
+      lawfully be registered however much the founders prefer it.
+    intake:
+      founders: 2
+      capital_birr: 5000
+    expect_excluded: [plc, one_person_plc, sole_proprietorship]
+    expect_reason_codes: [capital_below_minimum]
+
+  - id: adv-006
+    note: >
+      Exactly the minimum. "May not be less than" makes 15,000 sufficient, and
+      an off-by-one here would wrongly bar a lawful company.
+    intake:
+      founders: 3
+      capital_birr: 15000
+      wants_limited_liability: true
+    expect_recommended: plc
+    expect_reason_codes: [capital_sufficient]
+
+  - id: adv-007
+    note: >
+      Fifty-one founders. Art. 495/4 caps a private limited company at fifty,
+      and the share company — whose own minimum the Code never states — is the
+      form left standing.
+    intake:
+      founders: 51
+    expect_excluded: [plc, sole_proprietorship, one_person_plc]
+    expect_reason_codes: [members_above_maximum]
+
+  - id: adv-008
+    note: >
+      A regulated sector. The Commercial Code makes operating financial
+      services a trade (Art. 5/26) but says nothing about the licence, and the
+      banking, insurance and microfinance proclamations are not indexed. The
+      correct output is no licence and an explicit statement of why.
+    intake:
+      founders: 4
+      activity_code: financial_services
+      capital_birr: 40000
+      wants_limited_liability: true
+    expect_recommended: plc
+    expect_no_licences: true
+    expect_caveats_include:
+      - "Financial services are licensed under legislation that is not indexed here"
+
+  - id: adv-009
+    note: >
+      Foreign participation. No investment legislation is indexed, so the
+      advisor must say so rather than let silence read as permission.
+    intake:
+      founders: 2
+      capital_birr: 100000
+      foreign_ownership: true
+    expect_unsupported_mentions: ["investment legislation"]
+
+  - id: adv-010
+    note: >
+      A founder who explicitly does not want limited liability. A preference is
+      never a legal bar, so every lawful form stays on the list and the
+      unlimited-liability partnership is not excluded.
+    intake:
+      founders: 2
+      wants_limited_liability: false
+    expect_not_excluded: [general_partnership, plc]
+
+  - id: adv-011
+    note: >
+      Every disclaimer scenario: whatever else is true, the advisor states that
+      this is information rather than advice (PRD §12, Rule 5).
+    intake:
+      founders: 2
+    expect_caveats_include:
+      - "This is legal information, not legal advice"
+
+  - id: adv-012
+    note: >
+      A joint venture has no legal personality and is not registered (Art. 175,
+      Art. 234), so the registration step must not be attached to it. Checked
+      through the excluded/alternative lists rather than a recommendation,
+      since a joint venture is never the top-ranked form for these answers.
+    intake:
+      founders: 2
+      capital_birr: 15000
+    expect_recommended: plc
+    expect_not_excluded: [joint_venture]

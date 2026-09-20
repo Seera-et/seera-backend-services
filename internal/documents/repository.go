@@ -218,6 +218,12 @@ func (r *Repository) ResolveVersion(
 	documentID legal.DocumentID,
 	versionID legal.VersionID,
 ) (VersionSummary, error) {
+	// The optional filter is NULL-or-match, not the ''-or-match used everywhere
+	// else in this file. The difference is the column type, and it is not
+	// cosmetic: with `$2 = '' OR v.id = $2`, Postgres resolves $2 to text from
+	// its first use and then has no uuid = text operator for the second, so the
+	// statement fails to parse — every request, not just the filtered ones. The
+	// '' pattern is safe on the text columns List filters on and only on those.
 	query := `
 		SELECT
 			v.id, v.version_label, v.status, v.effective_from, v.repealed_at, v.published_at,
@@ -225,12 +231,20 @@ func (r *Repository) ResolveVersion(
 		FROM document_versions v
 		WHERE v.document_id = $1
 		  AND ` + visibleVersions + `
-		  AND ($2 = '' OR v.id = $2)
+		  AND ($2::uuid IS NULL OR v.id = $2::uuid)
 		ORDER BY (v.status = 'published') DESC, v.effective_from DESC NULLS LAST
 		LIMIT 1`
 
+	// nil, not "", so the cast above has a uuid-typed NULL to test rather than
+	// an empty string that is not a uuid at all.
+	var versionArg *string
+	if versionID != "" {
+		id := string(versionID)
+		versionArg = &id
+	}
+
 	var v VersionSummary
-	err := r.pool.QueryRow(ctx, query, string(documentID), string(versionID)).Scan(
+	err := r.pool.QueryRow(ctx, query, string(documentID), versionArg).Scan(
 		&v.ID, &v.Label, &v.Status, &v.EffectiveFrom, &v.RepealedAt,
 		&v.PublishedAt, &v.ArticleCount,
 	)

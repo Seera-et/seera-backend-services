@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/Seera-et/seera-backend-services/internal/ai"
+	"github.com/Seera-et/seera-backend-services/internal/auth"
+	"github.com/Seera-et/seera-backend-services/internal/business"
 	"github.com/Seera-et/seera-backend-services/internal/chat"
 	"github.com/Seera-et/seera-backend-services/internal/citations"
 	"github.com/Seera-et/seera-backend-services/internal/config"
@@ -91,6 +93,26 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 		return server.Handlers{}, err
 	}
 
+	// Authentication. Supabase issues the tokens and holds the Google client
+	// secret; this process only ever verifies signatures against the project's
+	// public JWKS, so there is no credential to configure beyond the project
+	// URL — and nothing here to leak.
+	//
+	// Without it every route that costs money or belongs to one person is left
+	// unregistered, including Q&A. That is deliberate: serving an expensive,
+	// unauthenticated endpoint because a config value was forgotten is the
+	// failure mode worth making loud.
+	if cfg.SupabaseProjectURL == "" {
+		log.Warn("authentication disabled: SUPABASE_PROJECT_URL is not set. " +
+			"Q&A, the advisor and every account route are unregistered")
+	} else {
+		handlers.Verifier = auth.NewVerifier(cfg.SupabaseProjectURL, cfg.SupabaseJWTAudience)
+		handlers.Me = auth.NewHandler(auth.NewRepository(db.Pool), log).Me()
+		log.Info("authentication enabled",
+			slog.String("issuer", cfg.SupabaseProjectURL+"/auth/v1"),
+			slog.String("audience", cfg.SupabaseJWTAudience))
+	}
+
 	// Ingestion needs an embedder to index with and a token to guard the route.
 	switch {
 	case embedder == nil:
@@ -150,6 +172,17 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 	handlers.CorpusStats = documentsHandler.Stats()
 	if embedder == nil {
 		log.Warn("corpus search limited to keyword matching: no embedding provider configured")
+	}
+
+	// The Business & License Advisor. Deterministic and cited end to end — no
+	// embedder, no LLM, no credential — so it is wired whenever there is a
+	// database. Whether it can actually recommend anything depends on an
+	// administrator having published a rule set, which the endpoint reports for
+	// itself rather than being decided here.
+	businessRepo := business.NewRepository(db.Pool)
+	handlers.Business = business.NewHandler(business.NewService(businessRepo), log).Routes()
+	if !cfg.AdminToken.Empty() {
+		handlers.BusinessRules = business.PublishHandler(businessRepo, log)
 	}
 
 	// Q&A needs retrieval (an embedder) and generation (an LLM). Either missing
