@@ -20,7 +20,19 @@ func (s *Server) routes() http.Handler {
 	r.Use(cors(s.cfg.CORSAllowedOrigins))
 
 	// Operational endpoints: no rate limit, no CORS requirement, no versioning.
+	//
+	// Two paths, one handler, because Google Front End swallows the literal
+	// path "/healthz" on *.run.app and answers it with its own HTML 404 — the
+	// request never reaches this process. It is an exact-path interception:
+	// "/healthz/", "/health", "/HEALTHZ" and every other variant are forwarded
+	// normally, which is how it was found.
+	//
+	// /healthz stays because it is the conventional name and works everywhere
+	// else (docker, any other host). /readyz is the one clients should use, and
+	// is the more honest name anyway: handleHealth checks the database, so it
+	// reports readiness to serve, not merely that the process is alive.
 	r.Get("/healthz", s.handleHealth)
+	r.Get("/readyz", s.handleHealth)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Public API: browsing published law. No account needed — a visitor

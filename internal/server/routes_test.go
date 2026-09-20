@@ -34,19 +34,27 @@ func newTestServer(t *testing.T, db healthChecker) *Server {
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)), db, Handlers{})
 }
 
+// Both paths, because /healthz alone is not reachable in production: Google
+// Front End answers that exact path itself on *.run.app and never forwards it,
+// so the frontend's connection indicator polls /readyz. If this test loses the
+// alias, that indicator reads Offline against a perfectly healthy API.
 func TestHealthReportsOKWhenDatabaseReachable(t *testing.T) {
-	rec := httptest.NewRecorder()
-	newTestServer(t, stubDB{}).routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	for _, path := range []string{"/healthz", "/readyz"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			newTestServer(t, stubDB{}).routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	var got healthResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
-	}
-	if got.Status != "ok" || got.DB != "up" {
-		t.Errorf("body = %+v, want {ok up}", got)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+			var got healthResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+			}
+			if got.Status != "ok" || got.DB != "up" {
+				t.Errorf("body = %+v, want {ok up}", got)
+			}
+		})
 	}
 }
 
