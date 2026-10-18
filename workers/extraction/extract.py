@@ -315,6 +315,39 @@ def ocr_page(page, ocr_lang: str) -> str:
     return pytesseract.image_to_string(image, lang=ocr_lang)
 
 
+def ethiopic_ratio(text: str) -> float:
+    """Share of word-like tokens that are Ethiopic rather than Latin.
+
+    Exists because nothing else checks the operator's --language against what
+    the PDF actually contains. Get it wrong and the text is stored under the
+    wrong language, Postgres indexes Ethiopic with the English stemmer (see
+    migration 0002), and the chunker writes an English context header onto
+    Amharic provisions. None of that fails; it just quietly retrieves badly.
+
+    Bilingual documents are real, so this is a ratio for the ingestion side to
+    judge, not a verdict made here.
+    """
+    tokens = text.split()
+    if not tokens:
+        return 0.0
+
+    ethiopic = countable = 0
+    for token in tokens:
+        stripped = token.strip(QUALITY_STRIP_CHARS)
+        if not stripped or stripped.isdigit():
+            continue
+        is_ethiopic = bool(ETHIOPIC_RUN.search(stripped))
+        if not is_ethiopic and not LATIN_WORD.match(stripped):
+            continue
+        countable += 1
+        if is_ethiopic:
+            ethiopic += 1
+
+    if countable == 0:
+        return 0.0
+    return ethiopic / countable
+
+
 def text_quality(text: str) -> float:
     """Share of whitespace-separated tokens that look like words.
 
@@ -627,6 +660,11 @@ def extract(pdf_path: Path, language: str, use_ocr: bool, ocr_lang: str,
             "check a few against the PDF before publishing."
         )
 
+    numbered_articles = sorted(int(a.article_no) for a in articles if a.article_no.isdigit())
+    numbered_range = (
+        (numbered_articles[0], numbered_articles[-1]) if numbered_articles else (0, 0)
+    )
+
     payload = {
         "source_file": pdf_path.name,
         "language": language,
@@ -638,10 +676,28 @@ def extract(pdf_path: Path, language: str, use_ocr: bool, ocr_lang: str,
             "pages_without_text_layer": empty,
             "pages_ocred": ocred,
             "structure": "window-fallback" if fallback else "article",
+            # Everything below is for the ingestion gates, which must decide
+            # whether to publish a document without a human reading it. They
+            # were previously computed here and thrown away, leaving the Go
+            # side to infer quality by pattern-matching English warning text.
+            "text_quality": round(quality, 3),
+            "ethiopic_ratio": round(ethiopic_ratio(text), 3),
+            "article_gaps": len(gaps),
+            # The span of article text, against `characters`, is how much of
+            # the document actually landed inside a provision. A 500-page code
+            # that yielded 40 articles looks fine by every other number here.
+            "article_characters": sum(
+                max(0, a.char_end - a.char_start) for a in articles
+            ),
+            # The raw bounds, because one misread page number becoming article
+            # "999" turns a clean parse into 899 reported gaps, and an operator
+            # needs to see that rather than guess at it.
+            "article_number_min": numbered_range[0],
+            "article_number_max": numbered_range[1],
         },
     }
 
-    numbered = sorted(int(a.article_no) for a in articles if a.article_no.isdigit())
+    numbered = numbered_articles
     report = Report(
         number_range=f"{numbered[0]}-{numbered[-1]} ({len(numbered)} found)" if numbered else "",
         gaps=[str(g) for g in gaps],
@@ -657,6 +713,24 @@ def extract(pdf_path: Path, language: str, use_ocr: bool, ocr_lang: str,
     return payload, report
 
 
+def output_path_for(pdf_path: Path, out_dir: Path, store_root: Path | None) -> Path:
+    """Where this document's JSON belongs.
+
+    The default, out/<stem>.json, cannot be used over a crawler store: every
+    downloaded file is <root>/raw/<doc-id>/original.pdf, so a batch run would
+    write every document to out/original.json and keep only the last one.
+
+    With --store-root the document id comes from the PDF's parent directory,
+    mirroring crawler.Store.PDFPath, and the output mirrors
+    crawler.Store.StructuredPath. Those two layouts are asserted against each
+    other in internal/crawler/store_test.go, so renaming the Go side breaks a
+    test rather than silently leaving this writing to a path nothing reads.
+    """
+    if store_root is None:
+        return out_dir / f"{pdf_path.stem}.json"
+    return store_root / "structured" / pdf_path.parent.name / "document.json"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pdfs", nargs="+", type=Path, help="PDF files to extract")
@@ -664,6 +738,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="language of the document text")
     parser.add_argument("--out", type=Path, default=Path("out"),
                         help="output directory for the JSON (default: out/)")
+    parser.add_argument("--store-root", type=Path, default=None,
+                        help="write into a crawler store: <root>/structured/<doc-id>/document.json, "
+                             "where <doc-id> is the PDF's parent directory name. Required for "
+                             "batching over a crawl, since every crawled file is named original.pdf")
     parser.add_argument("--ocr", action="store_true",
                         help="OCR pages that have no text layer")
     parser.add_argument("--ocr-lang", default=None,
@@ -681,7 +759,8 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     ocr_lang = args.ocr_lang or ("amh+eng" if args.language == "am" else "eng")
-    args.out.mkdir(parents=True, exist_ok=True)
+    if args.store_root is None:
+        args.out.mkdir(parents=True, exist_ok=True)
 
     exit_code = 0
     for pdf_path in args.pdfs:
@@ -698,7 +777,8 @@ def main(argv: list[str] | None = None) -> int:
             exit_code = 3
             continue
 
-        out_path = args.out / f"{pdf_path.stem}.json"
+        out_path = output_path_for(pdf_path, args.out, args.store_root)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
         report.print_to(sys.stderr)

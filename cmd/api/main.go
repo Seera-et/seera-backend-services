@@ -9,9 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/Seera-et/seera-backend-services/internal/ai"
 	"github.com/Seera-et/seera-backend-services/internal/auth"
@@ -88,7 +86,7 @@ func run() error {
 func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (server.Handlers, error) {
 	var handlers server.Handlers
 
-	embedder, err := buildEmbedder(cfg, log)
+	embedder, err := ingestion.NewEmbedder(cfg.GeminiAPIKey.Value(), cfg.OpenAIAPIKey.Value(), log)
 	if err != nil {
 		return server.Handlers{}, err
 	}
@@ -120,25 +118,8 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 	case cfg.AdminToken.Empty():
 		log.Warn("ingestion disabled: ADMIN_API_TOKEN is not set")
 	default:
-		batch := ingestion.NewBatchEmbedder(embedder).
-			PerMinute(cfg.EmbedTextsPerMinute).
-			OnWait(
-				func(attempt int, wait time.Duration, cause error) {
-					// Distinguishes "waiting on the provider's quota window" from
-					// "stuck": a large legal code on a free tier spends most of its
-					// ingestion here, and silence looks identical to a hang.
-					if attempt == 0 {
-						// Deliberate pacing, not a rejection.
-						log.Info("pacing embeddings to stay inside quota",
-							slog.Duration("wait", wait.Round(time.Second)))
-						return
-					}
-					log.Warn("embedding rate limited, waiting as instructed",
-						slog.Int("attempt", attempt),
-						slog.Duration("wait", wait),
-						slog.String("cause", compactError(cause.Error())))
-				})
-		ingestSvc := ingestion.NewService(db.Pool, batch, log)
+		ingestSvc := ingestion.NewService(db.Pool,
+			ingestion.Paced(embedder, cfg.EmbedTextsPerMinute, log), log)
 		handlers.Ingest = ingestion.NewHandler(ingestSvc, log)
 		log.Info("ingestion enabled",
 			slog.String("embedding_model", embedder.Model()),
@@ -265,25 +246,6 @@ func buildHandlers(cfg config.Config, log *slog.Logger, db *database.Pool) (serv
 	return handlers, nil
 }
 
-// buildEmbedder picks the embedding provider.
-//
-// Gemini is preferred when its key is present: the corpus is half Amharic, and
-// Gemini's multilingual coverage is materially better than
-// text-embedding-3-large's — which is the risk the plan flagged in §2.1 and
-// reserved a migration for. Each provider writes to its own table, so both can be
-// populated at once and compared on the language-split evaluation.
-func buildEmbedder(cfg config.Config, log *slog.Logger) (ai.Embedder, error) {
-	switch {
-	case !cfg.GeminiAPIKey.Empty():
-		return ai.NewGeminiEmbedder(cfg.GeminiAPIKey.Value())
-	case !cfg.OpenAIAPIKey.Empty():
-		log.Info("using OpenAI embeddings; set GEMINI_API_KEY for better Amharic coverage")
-		return ai.NewOpenAIEmbedder(cfg.OpenAIAPIKey.Value())
-	default:
-		return nil, nil
-	}
-}
-
 // buildLLM wraps the Gemini generation client with an OpenRouter fallback when
 // OPENROUTER_API_KEY is set. Embeddings never go through this path — the
 // corpus is embedded in Gemini's vector space specifically, and swapping that
@@ -343,24 +305,4 @@ func buildReranker(cfg config.Config, log *slog.Logger, llm ai.LLM) (rag.Reranke
 	// not about the question and abstaining beats answering.
 	ragCfg.MinRerankScore = 0.15
 	return reranker, ragCfg
-}
-
-// compactError flattens a provider's multi-line error into one log field,
-// keeping the part an operator can act on.
-//
-// Quota errors bury the useful sentence — which metric, what limit, how long to
-// wait — behind boilerplate about billing and documentation URLs. Truncating
-// from the front threw exactly that away, and the difference matters: a
-// per-minute limit means wait, a daily limit means stop until tomorrow or enable
-// billing.
-func compactError(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-
-	if i := strings.Index(s, "Quota exceeded for metric"); i >= 0 {
-		s = s[i:]
-	}
-	if len(s) > 400 {
-		s = s[:400] + "…"
-	}
-	return s
 }

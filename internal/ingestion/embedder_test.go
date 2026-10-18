@@ -3,6 +3,7 @@ package ingestion
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -271,5 +272,73 @@ func TestPerMinuteZeroDisablesPacing(t *testing.T) {
 	}
 	if len(*slept) != 0 {
 		t.Errorf("paced despite being disabled: %v", *slept)
+	}
+}
+
+// concurrentEmbedder is a provider that is safe to call from several
+// goroutines, which scriptedEmbedder deliberately is not.
+type concurrentEmbedder struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *concurrentEmbedder) Model() string   { return "test-model" }
+func (c *concurrentEmbedder) Version() string { return "v1" }
+func (c *concurrentEmbedder) Dimensions() int { return 4 }
+
+func (c *concurrentEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	v, err := c.Embed(ctx, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	return v[0], nil
+}
+
+func (c *concurrentEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+
+	out := make([][]float32, len(texts))
+	for j := range out {
+		out[j] = []float32{1, 0, 0, 0}
+	}
+	return out, nil
+}
+
+// One BatchEmbedder is shared by every caller: cmd/api hands the same instance
+// to the ingestion service, which serves concurrent requests, and cmd/ingest
+// runs against the same provider quota. The pacing window is read-modify-write
+// state, so without a lock this is a data race that -race reports and that in
+// production silently corrupts the budget — which is the one thing standing
+// between a free-tier key and a failed ingest.
+//
+// Run with -race; it passes vacuously otherwise.
+func TestPerMinuteIsSafeUnderConcurrency(t *testing.T) {
+	b := NewBatchEmbedder(&concurrentEmbedder{})
+	b.batchSize = 8
+	b.PerMinute(1000) // high enough that no goroutine actually waits
+	b.sleep = func(context.Context, time.Duration) error { return nil }
+
+	texts := make([]string, 32)
+	for i := range texts {
+		texts[i] = "chunk"
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = b.EmbedAll(context.Background(), texts)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: EmbedAll() = %v", i, err)
+		}
 	}
 }

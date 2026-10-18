@@ -166,6 +166,47 @@ func (s *Store) recordPath(docID string) string {
 	return filepath.Join(s.root, dirMetadata, docID+".json")
 }
 
+// ListRecords reads every record in the store, ordered by document id.
+//
+// The crawler itself never needs this — it works from a discovery list and
+// looks records up by id. Ingestion does: its unit of work is "every document
+// this store holds", and the store is the only place that knows what was
+// acquired.
+//
+// Ordered so a run's report, and which of two documents is processed first, is
+// the same on every machine.
+func (s *Store) ListRecords() ([]Record, error) {
+	entries, err := os.ReadDir(filepath.Join(s.root, dirMetadata))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read metadata directory: %w", err)
+	}
+
+	records := make([]Record, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		docID := strings.TrimSuffix(e.Name(), ".json")
+
+		// A record that will not parse is reported, not skipped: silently
+		// ignoring it would drop a document from the corpus with nothing said.
+		r, found, err := s.LoadRecord(docID)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		records = append(records, r)
+	}
+
+	sort.Slice(records, func(i, j int) bool { return records[i].DocID < records[j].DocID })
+	return records, nil
+}
+
 // SaveRecord writes a document's record, replacing any previous one.
 func (s *Store) SaveRecord(r Record) error {
 	r.UpdatedAt = time.Now().UTC()

@@ -27,9 +27,19 @@ Then, offline:
 
 ```sh
 python workers/extraction/triage.py ./data/raw
-python workers/extraction/extract.py ./data/raw/<doc-id>/original.pdf \
-    --language en --out ./data/structured/<doc-id>/
+python workers/extraction/extract.py ./data/raw/*/original.pdf \
+    --language en --store-root ./data
 ```
+
+And then into the database, which is `cmd/ingest`'s job:
+
+```sh
+go run ./cmd/ingest -data ./data -dry-run
+go run ./cmd/ingest -data ./data
+```
+
+`--store-root` matters for the second command: every file here is named
+`original.pdf`, so `--out` would write every document to one path.
 
 ### Flags worth knowing
 
@@ -113,7 +123,17 @@ data/
   structured/ <doc-id>/document.json     ← ingestion.Extraction shape
   metadata/   <doc-id>.json              ← crawl record: state, provenance, checksum
   index/      checksums.json             ← sha256 → doc-id, for dedupe
+  ingest/     <doc-id>.json              ← cmd/ingest writes this; see below
 ```
+
+`ingest/` is **not** this package's. `cmd/ingest` keeps its outcomes in a
+separate ledger rather than advancing `Record.State`, and that separation is
+load-bearing: `State.Terminal()` covers `READY_FOR_INGESTION` and `FAILED`, and
+`-resume` skips terminal records — so writing an ingestion failure into the
+state would make the next crawl skip that document forever, removing it from
+acquisition because its *text* parsed badly. `Record` is also rewritten whole on
+every save, so a ten-minute ingest holding a loaded copy would clobber whatever
+the crawler wrote meanwhile.
 
 Dedupe is by **sha256**, and survives restarts. The Ministry links the same
 consolidated PDF from more than one law page; ingesting it twice would put every

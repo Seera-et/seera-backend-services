@@ -11,7 +11,9 @@ per-document report.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
+import extract
 from extract import build_articles, build_windows, find_structure
 from geez import geez_to_int, is_geez_numeral, normalize_number
 
@@ -241,3 +243,58 @@ class TestWindowFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutputPathTest(unittest.TestCase):
+    """The crawler store names every downloaded file original.pdf.
+
+    Without --store-root a batch run over a crawl writes every document to
+    out/original.json, each overwriting the last, and the operator is left with
+    one file and no indication that 59 others were discarded.
+    """
+
+    def test_default_uses_the_file_stem(self):
+        self.assertEqual(
+            extract.output_path_for(Path("a/commercial_code.pdf"), Path("out"), None),
+            Path("out/commercial_code.json"),
+        )
+
+    def test_store_root_uses_the_doc_id_directory(self):
+        self.assertEqual(
+            extract.output_path_for(
+                Path("data/raw/labour-proclamation-1156-9f3a1c2b/original.pdf"),
+                Path("out"),
+                Path("data"),
+            ),
+            Path("data/structured/labour-proclamation-1156-9f3a1c2b/document.json"),
+        )
+
+    def test_store_root_keeps_batched_documents_apart(self):
+        paths = {
+            extract.output_path_for(Path(f"data/raw/doc-{i}/original.pdf"), Path("out"), Path("data"))
+            for i in range(3)
+        }
+        self.assertEqual(len(paths), 3, "batched documents collided on one output path")
+
+
+class EthiopicRatioTest(unittest.TestCase):
+    """Nothing else checks --language against what the PDF actually holds.
+
+    A mismatch is silent and permanent: the text is stored under the wrong
+    language, Postgres indexes Ethiopic with the English stemmer, and the
+    chunker writes an English context header onto Amharic provisions.
+    """
+
+    def test_english_text_scores_zero(self):
+        self.assertEqual(extract.ethiopic_ratio("A private limited company may be formed"), 0.0)
+
+    def test_amharic_text_scores_one(self):
+        self.assertEqual(extract.ethiopic_ratio("የንግድ ማህበር ሊቋቋም ይችላል"), 1.0)
+
+    def test_digits_do_not_count_either_way(self):
+        self.assertEqual(extract.ethiopic_ratio("1956 1960 2021"), 0.0)
+
+    def test_bilingual_text_lands_in_between(self):
+        ratio = extract.ethiopic_ratio("የንግድ ማህበር company may be formed")
+        self.assertGreater(ratio, 0.0)
+        self.assertLess(ratio, 1.0)

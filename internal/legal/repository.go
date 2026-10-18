@@ -17,6 +17,18 @@ import (
 // whether this is a new version or a mistake.
 var ErrDuplicateDocument = errors.New("document already exists")
 
+// ErrDuplicateVersionLabel is returned when a document already has a version
+// under this label. The caller decides whether that means "already done" or a
+// genuine conflict — an amending proclamation and the code it amends can print
+// the same number, and we never invent a suffixed label to get around it.
+var ErrDuplicateVersionLabel = errors.New("version label already exists for this document")
+
+// ErrAlreadyIngested is returned when these exact bytes are already in the
+// corpus, under any document. Distinct from ErrDuplicateVersionLabel because
+// the right response differs: this one is a no-op to report, that one is a
+// conflict to look at.
+var ErrAlreadyIngested = errors.New("this file has already been ingested")
+
 // DBTX is the subset of pgx satisfied by both a pool and a transaction, so the
 // same repository code runs inside or outside one. Ingestion always runs inside.
 type DBTX interface {
@@ -106,8 +118,10 @@ func (r *Repository) FindDocumentByTitle(ctx context.Context, title string, lang
 // InsertVersion creates a draft version and returns its ID.
 func (r *Repository) InsertVersion(ctx context.Context, v Version) (VersionID, error) {
 	const q = `
-		INSERT INTO document_versions (document_id, version_label, effective_from, repealed_at, status)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO document_versions
+			(document_id, version_label, effective_from, repealed_at, status,
+			 source_checksum, source_url, storage_key)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id`
 
 	status := v.Status
@@ -115,15 +129,110 @@ func (r *Repository) InsertVersion(ctx context.Context, v Version) (VersionID, e
 		status = VersionDraft
 	}
 
+	// NULL, not "", for an unknown checksum: the unique index is partial on
+	// IS NOT NULL, and empty strings would collide with each other.
+	var checksum *string
+	if v.SourceChecksum != "" {
+		checksum = &v.SourceChecksum
+	}
+
 	var id VersionID
-	err := r.db.QueryRow(ctx, q, v.DocumentID, v.Label, v.EffectiveFrom, v.RepealedAt, status).Scan(&id)
+	err := r.db.QueryRow(ctx, q,
+		v.DocumentID, v.Label, v.EffectiveFrom, v.RepealedAt, status,
+		checksum, v.SourceURL, v.StorageKey).Scan(&id)
 	if err != nil {
-		if isUniqueViolation(err) {
-			return "", fmt.Errorf("version %q already exists for this document", v.Label)
+		// Two uniques on this table now, and reporting one as the other sends
+		// an operator looking at the wrong thing. Switch on the constraint.
+		switch constraintName(err) {
+		case "document_versions_label_key":
+			return "", fmt.Errorf("%w: %q", ErrDuplicateVersionLabel, v.Label)
+		case "document_versions_source_checksum_key":
+			return "", fmt.Errorf("%w: sha256 %s", ErrAlreadyIngested, v.SourceChecksum)
 		}
 		return "", fmt.Errorf("insert version: %w", err)
 	}
 	return id, nil
+}
+
+// FindVersionBySourceChecksum finds the version produced by a given file.
+//
+// This is the lookup that makes re-ingestion cheap. Ingestion embeds before it
+// opens its transaction, so asking this question first is the difference
+// between a re-run costing one SELECT and costing a document's worth of
+// embedding calls followed by a rollback.
+func (r *Repository) FindVersionBySourceChecksum(ctx context.Context, checksum string) (Version, error) {
+	const q = `
+		SELECT id, document_id, version_label, effective_from, repealed_at,
+		       status, published_at, coalesce(source_checksum, ''), source_url, storage_key
+		FROM document_versions
+		WHERE source_checksum = $1`
+
+	var v Version
+	err := r.db.QueryRow(ctx, q, checksum).Scan(
+		&v.ID, &v.DocumentID, &v.Label, &v.EffectiveFrom, &v.RepealedAt,
+		&v.Status, &v.PublishedAt, &v.SourceChecksum, &v.SourceURL, &v.StorageKey)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Version{}, err
+		}
+		return Version{}, fmt.Errorf("find version by checksum: %w", err)
+	}
+	return v, nil
+}
+
+// FindVersionByLabel reports whether a document already carries this label.
+func (r *Repository) FindVersionByLabel(ctx context.Context, documentID DocumentID, label string) (Version, error) {
+	const q = `
+		SELECT id, document_id, version_label, effective_from, repealed_at,
+		       status, published_at, coalesce(source_checksum, ''), source_url, storage_key
+		FROM document_versions
+		WHERE document_id = $1 AND version_label = $2`
+
+	var v Version
+	err := r.db.QueryRow(ctx, q, documentID, label).Scan(
+		&v.ID, &v.DocumentID, &v.Label, &v.EffectiveFrom, &v.RepealedAt,
+		&v.Status, &v.PublishedAt, &v.SourceChecksum, &v.SourceURL, &v.StorageKey)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Version{}, err
+		}
+		return Version{}, fmt.Errorf("find version by label: %w", err)
+	}
+	return v, nil
+}
+
+// HasPublishedVersion reports whether a document already has a live version.
+//
+// The publish decision depends on it, so it is asked inside the publishing
+// transaction: PublishVersion supersedes whatever is currently published before
+// publishing, so two concurrent ingests that both checked beforehand would not
+// collide — the second would silently demote the first.
+func (r *Repository) HasPublishedVersion(ctx context.Context, documentID DocumentID) (bool, error) {
+	const q = `SELECT EXISTS (
+		SELECT 1 FROM document_versions WHERE document_id = $1 AND status = 'published')`
+
+	var exists bool
+	if err := r.db.QueryRow(ctx, q, documentID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check published version: %w", err)
+	}
+	return exists, nil
+}
+
+// DeleteVersion removes a version and everything hanging off it.
+//
+// The only sanctioned way to re-ingest a document whose parse has improved.
+// Articles, chunks and embeddings go with it via ON DELETE CASCADE. This is the
+// one place the corpus is destructive, so it is never called implicitly — the
+// operator asks for it by name.
+func (r *Repository) DeleteVersion(ctx context.Context, versionID VersionID) error {
+	tag, err := r.db.Exec(ctx, `DELETE FROM document_versions WHERE id = $1`, versionID)
+	if err != nil {
+		return fmt.Errorf("delete version: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("delete version %s: no such version", versionID)
+	}
+	return nil
 }
 
 // InsertArticles writes articles and fills in their generated IDs.
@@ -287,4 +396,15 @@ func VectorLiteral(v []float32) string {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// constraintName returns the constraint a unique violation names, or "" if the
+// error is not one. Which constraint fired is the whole message: a table with
+// two uniques cannot report either accurately without it.
+func constraintName(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return pgErr.ConstraintName
+	}
+	return ""
 }

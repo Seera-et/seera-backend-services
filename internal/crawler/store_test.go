@@ -2,7 +2,9 @@ package crawler
 
 import (
 	"log/slog"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -259,5 +261,80 @@ func TestStateTerminal(t *testing.T) {
 		if s.Terminal() {
 			t.Errorf("%q should not be terminal", s)
 		}
+	}
+}
+
+// The structured path is a contract with workers/extraction, which writes it.
+//
+// extract.py --store-root builds "<root>/structured/<doc-id>/document.json"
+// independently, from the PDF's parent directory name. Nothing links the two
+// but this test: rename dirStructured or the filename and Go still compiles
+// while the extractor quietly writes where nothing reads. Keep the literal.
+func TestStructuredPathMatchesTheExtractorsLayout(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() = %v", err)
+	}
+
+	const docID = "labour-proclamation-1156-9f3a1c2b"
+
+	got := store.StructuredPath(docID)
+	want := filepath.Join(store.root, "structured", docID, "document.json")
+	if got != want {
+		t.Errorf("StructuredPath(%q) = %q, want %q\n"+
+			"workers/extraction/extract.py builds this path too — change both, "+
+			"or the extractor writes where ingestion does not read", docID, got, want)
+	}
+
+	// The doc id the extractor derives is the PDF's parent directory, so the
+	// two layouts have to agree on that as well.
+	if parent := filepath.Base(filepath.Dir(store.PDFPath(docID))); parent != docID {
+		t.Errorf("PDFPath parent = %q, want %q: extract.py --store-root takes the "+
+			"document id from this directory name", parent, docID)
+	}
+}
+
+func TestListRecordsIsSortedAndSkipsNonRecords(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() = %v", err)
+	}
+
+	for _, id := range []string{"zeta", "alpha", "mid"} {
+		if err := store.SaveRecord(Record{DocID: id, State: StateReady}); err != nil {
+			t.Fatalf("SaveRecord(%q) = %v", id, err)
+		}
+	}
+	// A stray file in the metadata directory must not become a document.
+	if err := os.WriteFile(filepath.Join(store.root, dirMetadata, "notes.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := store.ListRecords()
+	if err != nil {
+		t.Fatalf("ListRecords() = %v", err)
+	}
+
+	var ids []string
+	for _, r := range records {
+		ids = append(ids, r.DocID)
+	}
+	want := []string{"alpha", "mid", "zeta"}
+	if !slices.Equal(ids, want) {
+		t.Errorf("ListRecords() = %v, want %v", ids, want)
+	}
+}
+
+func TestListRecordsOnAnEmptyStore(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() = %v", err)
+	}
+	records, err := store.ListRecords()
+	if err != nil {
+		t.Fatalf("ListRecords() = %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("got %d records from an empty store", len(records))
 	}
 }

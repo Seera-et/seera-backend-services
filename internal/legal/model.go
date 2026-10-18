@@ -111,6 +111,18 @@ type Version struct {
 	RepealedAt    *time.Time
 	Status        VersionStatus
 	PublishedAt   *time.Time
+
+	// Provenance of the artifact this version was parsed from. It lives here
+	// rather than on Document because a document accumulates versions from
+	// different files, and ingestion reuses an existing document row without
+	// rewriting it — so a document-level source URL only ever describes the
+	// first version ingested.
+	//
+	// SourceChecksum is the sha256 of that file, and is unique across the whole
+	// corpus: the same bytes are never ingested twice.
+	SourceChecksum string
+	SourceURL      string
+	StorageKey     string
 }
 
 // InForceAt reports whether this version was in force on the given date.

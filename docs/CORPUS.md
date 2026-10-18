@@ -117,3 +117,44 @@ Note what this means for the evaluation gate: with only one usable Amharic docum
 language-split Precision@5 target in the plan cannot be measured meaningfully yet. Either
 the eval set is English-first until better Amharic sources arrive, or the Amharic half
 rests entirely on Commercial Code 1243.
+
+## How documents now reach the database
+
+Since the corpus bridge (`cmd/ingest`) was built, the three stages are
+connected and each document's outcome is recorded:
+
+```
+cmd/crawler run      → data/raw/<id>/original.pdf, data/metadata/<id>.json
+extract.py --store-root → data/structured/<id>/document.json
+cmd/ingest           → Postgres rows + vectors, data/ingest/<id>.json
+```
+
+`cmd/ingest` takes each document's title, type, number and publication date from
+the crawl record instead of asking an operator to retype them, and decides
+whether to publish from the extraction's own numbers. The gates exist because of
+what this assessment found:
+
+- **Pages with no text layer.** OCR is still not wired up, so the 24 `scanned`
+  and 12 `junk` documents here are exactly what the pipeline will keep meeting.
+  A 300-page scan carrying five incidental text pages passes the 0.60
+  text-quality refusal — those five pages are real text — and would otherwise be
+  ingested as a five-article "code". This is the gate that catches it.
+- **Window fallback.** The six documents with no article structure are ingested
+  as drafts rather than published, so they are inspectable without being
+  citable.
+- **Script against declared language.** Nothing previously checked the
+  `--language` an operator typed against what the PDF holds, and an Amharic
+  document stored as English is indexed with the English stemmer and given an
+  English context header. Silent, and permanent.
+- **Repealed and amended laws.** Ministry law pages state this, and it was being
+  discarded. A repealed proclamation's page carries no repeal date, so the
+  in-force filter would have read it as current law.
+- **Documents that parse perfectly and do not belong.** No mechanical gate
+  catches the US Sentencing Commission manual noted above. `cmd/ingest -deny`
+  takes a file of document ids, which is where that judgement is recorded.
+
+Byte-identical duplicates are handled in two places now: the crawler marks them
+`duplicate_of` and the ingest driver skips them, and `document_versions`
+additionally carries the file's sha256 under a corpus-wide unique index — so the
+same PDF cannot enter twice even if its law page is retitled between crawls and
+the title lookup misses.

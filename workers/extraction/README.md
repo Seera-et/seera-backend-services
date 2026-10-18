@@ -53,7 +53,31 @@ python extract.py labor_proclamation.pdf --language am --out out/ --ocr
 Exit status is `2` when a document fell back to window chunking, so a batch run
 cannot quietly produce a corpus that is mostly unstructured.
 
-Then hand the JSON to the API, which chunks, embeds, and indexes it:
+### Over a crawler store
+
+`--store-root` writes each document to `<root>/structured/<doc-id>/document.json`,
+taking the id from the PDF's parent directory. Use it for anything the crawler
+acquired, because every file it downloads is named `original.pdf` — with `--out`
+a batch run writes all of them to `out/original.json`, keeping only the last and
+saying nothing about the rest.
+
+```bash
+python extract.py ../../data/raw/*/original.pdf --language en --store-root ../../data
+```
+
+Then `cmd/ingest` takes it from there: it reads these files alongside the crawl
+records, builds each document's metadata from the record rather than asking for
+it again, and publishes what clears its quality gates.
+
+```bash
+go run ./cmd/ingest -data ./data -dry-run
+go run ./cmd/ingest -data ./data
+```
+
+### One document at a time
+
+For a single file outside a crawl, the API endpoint still takes the JSON
+directly:
 
 ```bash
 jq -n --arg t "Commercial Code of Ethiopia" --slurpfile e out/commercial_code.json '{
@@ -119,6 +143,23 @@ Field notes:
   windows instead. Low-confidence chunks are ingested but measured separately.
 - `char_start` / `char_end` index into the document's extracted text, so the UI can
   highlight the exact span in the source.
+
+`stats` carries the numbers `cmd/ingest`'s quality gates read. They are measured
+here because this is the only place that sees the document's text, and they are
+reported as numbers rather than as warning prose so the gates do not have to
+pattern-match English sentences:
+
+| Key | Gate it feeds |
+|---|---|
+| `pages_without_text_layer` | a scan with a few incidental text pages, which passes every other check |
+| `article_characters`, `characters` | how much of the text actually landed inside a provision |
+| `article_gaps`, `article_number_min`/`max` | markers the extractor missed, with the range so a misread page number is visible as such |
+| `ethiopic_ratio` | the `--language` you passed against the script actually present |
+| `text_quality` | reported only; extraction already refuses below 0.60 |
+
+New keys go **inside `stats`**. The Go side decodes the top level with
+`DisallowUnknownFields`, so a new top-level key breaks every existing caller,
+while `stats` is a free-form map.
 
 ## Per-document report
 

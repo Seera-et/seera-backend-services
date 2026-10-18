@@ -51,26 +51,50 @@ To run the API in a container instead (this verifies the image that ships):
 docker compose --profile full up --build
 ```
 
-## Ingesting a document
+## Adding documents
 
-Extraction is offline and by hand; parse quality is won by reading the output.
+Three stages, deliberately separate: acquire, extract, ingest. Each one is
+resumable and each one can be inspected before the next is run.
 
 ```bash
-cd workers/extraction
-python -m venv ../.venv && ../.venv/Scripts/pip install -r requirements.txt
+# 1. Acquire. Always set -limit on a first run.
+go run ./cmd/crawler run -limit 20 -data ./data
 
-python triage.py "path/to/pdfs" --json triage.json   # what is usable at all
-python extract.py "path/to/code.pdf" --language en --out out/
+# 2. Extract. Offline Python; parse quality is won by reading the output.
+cd workers/extraction && python -m venv ../.venv
+../.venv/bin/pip install -r requirements.txt
+python triage.py ../../data/raw --json triage.json       # what is usable at all
+python extract.py ../../data/raw/*/original.pdf --language en --store-root ../../data
+
+# 3. Ingest: chunk, embed, write, publish what passes the gates.
+go run ./cmd/ingest -data ./data -dry-run                # what would happen
+go run ./cmd/ingest -data ./data
 ```
 
-Then POST the JSON with its metadata — see
-[workers/extraction/README.md](workers/extraction/README.md) for the full request
-shape. `publish` defaults to `false`: a document is invisible to retrieval until
-someone has read its parse report.
+`--store-root` is what makes step 2 batchable: every crawled file is named
+`original.pdf`, so the default `out/<stem>.json` would write all of them to one
+path. With it, each document lands where `cmd/ingest` looks for it.
+
+`cmd/ingest` builds each document's metadata from the crawl record rather than
+asking for it again, and **publishes only what clears the quality gates** — real
+article structure, a text layer on most pages, most of the text inside a
+provision, a script matching the declared language, and a law the Ministry does
+not mark repealed or amended. Anything else is still ingested, as a draft, which
+is invisible to retrieval until someone promotes it. `-dry-run` reports every
+decision without writing or embedding anything.
+
+A second run is a near-free no-op: outcomes are recorded under `data/ingest/`,
+and a version records the sha256 of the file that produced it, so the same bytes
+are never embedded twice. Use `-replace` to deliberately re-ingest after
+improving the extractor.
+
+For a single document there is still `POST /api/v1/admin/documents/ingest` — see
+[workers/extraction/README.md](workers/extraction/README.md) for the request
+shape.
 
 **Expect ingestion to be slow on a free Gemini key.** The embedding quota is 100
-texts per minute, so an 800-article code takes about ten minutes. The API honours
-the delay the provider states and logs each wait, so a slow run is
+texts per minute, so an 800-article code takes about ten minutes. Both paths
+honour the delay the provider states and log each wait, so a slow run is
 distinguishable from a stuck one.
 
 ## Endpoints
@@ -228,6 +252,8 @@ noticed.
 
 ```
 cmd/api/                    HTTP entrypoint — wiring only
+cmd/crawler/                acquisition: justice.gov.et → PDFs on disk
+cmd/ingest/                 the bridge: acquired corpus → database + vectors
 internal/
   server/                   router, middleware, SSE plumbing, lifecycle
   qa/                       the Q&A endpoint and its SSE contract
@@ -235,6 +261,9 @@ internal/
   search/                   hybrid retrieval: vector, keyword, exact article
   citations/                citation resolution
   ingestion/                chunking, embedding, indexing, publishing
+  corpus/                   crawl record + extraction → ingest, and the
+                            quality gates that decide what may be published
+  crawler/                  justice.gov.et acquisition (its own binary)
   legal/                    domain types and their SQL
   ai/                       LLM and embedding providers behind interfaces
   database/                 pgx pool and forward-only migrations

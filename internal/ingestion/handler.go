@@ -55,6 +55,16 @@ type ingestRequest struct {
 	// someone has looked at how it parsed.
 	Publish bool `json:"publish"`
 
+	// SourceChecksum is the sha256 of the file the extraction came from.
+	// Optional over HTTP — a hand-assembled request may not have one — but
+	// supplying it makes a repeat request a cheap no-op instead of a document's
+	// worth of embedding calls followed by a conflict.
+	SourceChecksum string `json:"source_checksum"`
+
+	// Replace deletes the version these bytes previously produced. Destructive,
+	// so it is never the default.
+	Replace bool `json:"replace"`
+
 	Extraction Extraction `json:"extraction"`
 }
 
@@ -91,6 +101,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// present, and needs to say which version this is instead.
 		h.fail(w, r, http.StatusConflict, "duplicate_document", err.Error())
 		return
+	case errors.Is(err, legal.ErrDuplicateVersionLabel):
+		// The label is taken by different bytes. Reported separately from the
+		// checksum case because the fix differs: this one needs a human to say
+		// what this version actually is.
+		h.fail(w, r, http.StatusConflict, "duplicate_version_label", err.Error())
+		return
+	case errors.Is(err, ErrInvalidRequest):
+		h.fail(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+		return
 	case strings.HasPrefix(err.Error(), "invalid extraction"):
 		h.fail(w, r, http.StatusUnprocessableEntity, "invalid_extraction", err.Error())
 		return
@@ -105,33 +124,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.respond(w, r, http.StatusCreated, result)
 }
 
+// toServiceRequest converts the wire shape into a service request.
+//
+// It validates only what is a wire concern — dates, which arrive as strings and
+// have to be parsed before anything can look at them. Everything else (title,
+// label, doc type, language) is checked by Request.Validate inside Ingest, so
+// that callers which are not this handler get the same guarantees; it used to
+// live here, and the ingest CLI would have silently inherited none of it.
 func (r ingestRequest) toServiceRequest() (Request, error) {
 	var problems []error
-
-	if strings.TrimSpace(r.Document.Title) == "" {
-		problems = append(problems, errors.New("document.title is required"))
-	}
-	if strings.TrimSpace(r.Version.Label) == "" {
-		problems = append(problems, errors.New("version.label is required"))
-	}
-
-	docType := legal.DocType(r.Document.DocType)
-	switch docType {
-	case legal.DocTypeProclamation, legal.DocTypeRegulation, legal.DocTypeDirective,
-		legal.DocTypeCode, legal.DocTypeOther:
-	case "":
-		problems = append(problems, errors.New("document.doc_type is required"))
-	default:
-		problems = append(problems, fmt.Errorf(
-			"document.doc_type %q is not one of proclamation, regulation, directive, code, other",
-			r.Document.DocType))
-	}
-
-	lang := legal.Language(r.Document.Language)
-	if !lang.Valid() {
-		problems = append(problems, fmt.Errorf(
-			"document.language %q is not one of en, am", r.Document.Language))
-	}
 
 	publicationDate, err := parseDate("document.publication_date", r.Document.PublicationDate)
 	if err != nil {
@@ -154,15 +155,20 @@ func (r ingestRequest) toServiceRequest() (Request, error) {
 		return Request{}, errors.Join(problems...)
 	}
 
+	policy := PublishNever
+	if r.Publish {
+		policy = PublishAlways
+	}
+
 	return Request{
 		Document: legal.Document{
 			Title:            strings.TrimSpace(r.Document.Title),
-			DocType:          docType,
+			DocType:          legal.DocType(r.Document.DocType),
 			LegalDomain:      r.Document.LegalDomain,
 			IssuingAuthority: r.Document.IssuingAuthority,
 			PublicationDate:  publicationDate,
 			EffectiveDate:    effectiveDate,
-			Language:         lang,
+			Language:         legal.Language(r.Document.Language),
 			SourceURL:        r.Document.SourceURL,
 			StorageKey:       r.Document.StorageKey,
 		},
@@ -170,9 +176,13 @@ func (r ingestRequest) toServiceRequest() (Request, error) {
 			Label:         strings.TrimSpace(r.Version.Label),
 			EffectiveFrom: effectiveFrom,
 			RepealedAt:    repealedAt,
+			SourceURL:     r.Document.SourceURL,
+			StorageKey:    r.Document.StorageKey,
 		},
-		Publish:    r.Publish,
-		Extraction: r.Extraction,
+		PublishPolicy:  policy,
+		SourceChecksum: strings.TrimSpace(r.SourceChecksum),
+		Replace:        r.Replace,
+		Extraction:     r.Extraction,
 	}, nil
 }
 

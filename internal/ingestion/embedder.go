@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Seera-et/seera-backend-services/internal/ai"
@@ -80,6 +81,12 @@ type BatchEmbedder struct {
 	// perMinute is the client-side pacing budget in texts per minute; zero
 	// disables it. sent records when each text was submitted, forming the
 	// sliding window the budget is measured over.
+	//
+	// mu guards sent. One BatchEmbedder is shared by every caller of the
+	// embedding provider — cmd/api hands the same instance to the ingestion
+	// service that serves concurrent requests — and the budget is only a
+	// budget if every reservation is counted against the same window.
+	mu        sync.Mutex
 	perMinute int
 	sent      []time.Time
 	now       func() time.Time
@@ -92,6 +99,11 @@ func (b *BatchEmbedder) reserve(ctx context.Context, n int) error {
 	}
 
 	for {
+		// The lock covers the read-modify-write of the window and is released
+		// before sleeping: holding it across the wait would serialise every
+		// other caller behind this one for a full quota window.
+		b.mu.Lock()
+
 		now := b.now()
 		cutoff := now.Add(-time.Minute)
 
@@ -108,12 +120,15 @@ func (b *BatchEmbedder) reserve(ctx context.Context, n int) error {
 			for i := 0; i < n; i++ {
 				b.sent = append(b.sent, now)
 			}
+			b.mu.Unlock()
 			return nil
 		}
 
 		// Wait until the oldest entry leaves the window, which is the earliest
 		// moment the budget can possibly allow this batch.
 		wait := b.sent[0].Add(time.Minute).Sub(now) + 100*time.Millisecond
+		b.mu.Unlock()
+
 		if b.onWait != nil {
 			b.onWait(0, wait, errQuotaPacing)
 		}
